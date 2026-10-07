@@ -1069,7 +1069,7 @@ struct Parser {
                 // `-` before it turns it into that.)
                 return add(.intLit(value: -9223372036854775807 - 1), at)
             }
-            fail("integer literal too large (Adder's integers are 64-bit)")
+            fail("integer literal too large (PyTessel's integers are 64-bit)")
             return 0
         }
         if k == .float {

@@ -1,6 +1,6 @@
 # Reading and writing files.
 import os
-path = "adder_test_file.txt"
+path = "pytessel_test_file.txt"
 with open(path, "w") as f:
     f.write("first line\n")
     f.write("second line\n")

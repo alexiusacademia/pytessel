@@ -1,6 +1,6 @@
 # Counts the words of a file (or of this program): python's usual first script.
 #
-#   adder examples/wordcount.py README.md
+#   pytessel examples/wordcount.py README.md
 import sys
 
 path = sys.argv[1] if len(sys.argv) > 1 else sys.argv[0]

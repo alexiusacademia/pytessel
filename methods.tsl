@@ -473,7 +473,7 @@ fn strMethod(_ it: bind Interp, _ s: String, _ name: String, _ args: [Value], _ 
             Value.none
         }
         "encode" -> {
-            // (Adder has no bytes type: the bytes' numbers, in a list.)
+            // (PyTessel has no bytes type: the bytes' numbers, in a list.)
             var out: [Value] = []
             for b in Data(text: s).bytes {
                 out.append(.int(i: b))

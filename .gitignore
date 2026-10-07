@@ -1,10 +1,10 @@
 # What `tessel build` makes (and the IDE's Build and Package buttons).
-/adder
-/adder.exe
+/pytessel
+/pytessel.exe
 *.app/
 .DS_Store
 
 # Test output, and other builds.
 tests/*.actual
-/adder-*
+/pytessel-*
 __pycache__/

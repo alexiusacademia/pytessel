@@ -1,4 +1,4 @@
-// `import`: the modules Adder has built in (math, random, time, sys, os,
+// `import`: the modules PyTessel has built in (math, random, time, sys, os,
 // json, functools, string), and other Python files next to the program.
 
 fn builtinModules() -> [String] {
@@ -47,7 +47,7 @@ fn moduleValue(_ it: bind Interp, _ m: String, _ name: String) -> Value {
                     it.newList(out)
                 }
                 "maxsize" -> .int(i: 9223372036854775807)
-                "version" -> .str(s: "3.12 (Adder {adderVersion()}, a Python interpreter written in Tessel)")
+                "version" -> .str(s: "3.12 (PyTessel {pytesselVersion()}, a Python interpreter written in Tessel)")
                 "version_info" -> it.newTuple([.int(i: 3), .int(i: 12), .int(i: 0)])
                 "platform" -> .str(s: if platform() == "macos" { "darwin" } else if platform() == "windows" { "win32" } else { "linux" })
                 "stdout" -> .module(name: "sys.stdout")
@@ -532,7 +532,7 @@ fn randomCall(_ it: bind Interp, _ name: String, _ args: [Value]) -> Value {
             }
             it.newList(items.shuffled().prefix(k))
         }
-        // (Adder's random numbers can't be started from a seed.)
+        // (PyTessel's random numbers can't be started from a seed.)
         "seed" -> .none
         _ -> it.throw("AttributeError", "module 'random' has no attribute '{name}'")
     }

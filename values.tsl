@@ -4,7 +4,7 @@
 // dictionaries and objects aren't: two names can be the same list. So
 // those live in lists of the interpreter (`Interp.lists`, `.dicts`,
 // `.instances`, …), and a `Value` only says which one it is, by its place
-// there. Nothing is ever taken out of them: Adder has no garbage collector
+// there. Nothing is ever taken out of them: PyTessel has no garbage collector
 // (a program that makes millions of lists uses more and more memory).
 
 enum Value {

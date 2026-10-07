@@ -1282,7 +1282,7 @@ fn callBuiltin(_ it: bind Interp, _ name: String, _ args: [Value], _ kwNames: [S
                 }
                 return moduleCall(it, owner, member, args, kwNames, kwValues)
             }
-            it.throw("TypeError", "'{name}' isn't something Adder can call")
+            it.throw("TypeError", "'{name}' isn't something PyTessel can call")
         }
     }
 }

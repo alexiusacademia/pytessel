@@ -903,7 +903,7 @@ fn opMethod(_ op: BinOp) -> String {
 }
 
 fn tooLarge(_ it: bind Interp) -> Value {
-    it.throw("OverflowError", "integer result too large (Adder's integers are 64-bit)")
+    it.throw("OverflowError", "integer result too large (PyTessel's integers are 64-bit)")
 }
 
 fn intOp(_ it: bind Interp, _ op: BinOp, _ x: Int, _ y: Int) -> Value {

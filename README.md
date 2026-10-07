@@ -1,15 +1,15 @@
-# Adder
+# PyTessel
 
 A Python interpreter written in [Tessel](https://tessel-lang.netlify.app).
 It reads Python source, parses it, and runs it by walking the syntax tree:
 no part of CPython is used.
 
 ```sh
-tessel build . -o adder          # makes ./adder (about 1 MB, nothing else needed)
+tessel build . -o pytessel          # makes ./pytessel (about 1 MB, nothing else needed)
 
-./adder examples/mandelbrot.py   # run a program
-./adder -c "print(sum(range(101)))"
-./adder                          # the interactive prompt
+./pytessel examples/mandelbrot.py   # run a program
+./pytessel -c "print(sum(range(101)))"
+./pytessel                          # the interactive prompt
 ```
 
 ```
@@ -22,7 +22,7 @@ tessel build . -o adder          # makes ./adder (about 1 MB, nothing else neede
 
 ## What it runs
 
-Adder follows Python 3. The programs in `tests/` print exactly what CPython
+PyTessel follows Python 3. The programs in `tests/` print exactly what CPython
 prints for them, error messages included.
 
 - **Values:** `int`, `float`, `bool`, `str`, `None`, `list`, `tuple`, `dict`,
@@ -53,13 +53,13 @@ prints for them, error messages included.
 
 ## What it doesn't
 
-- **Integers are 64-bit.** Python's grow without limit; Adder raises
+- **Integers are 64-bit.** Python's grow without limit; PyTessel raises
   `OverflowError` where a result doesn't fit (`2 ** 100`).
 - **Generators run all at once.** Calling a function with `yield` runs it to
   its end and keeps what it yielded, so a generator that never ends (`while
   True: yield …`) never returns. `map`, `zip`, `filter` and `enumerate` work
   the same way.
-- **Nothing is ever freed.** Adder has no garbage collector: a program that
+- **Nothing is ever freed.** PyTessel has no garbage collector: a program that
   makes millions of lists or objects uses more and more memory.
 - **Not there:** `async`, `match`, `bytes`, complex numbers, `slice`
   objects, metaclasses, `__slots__`, descriptors of your own, and most of
@@ -90,7 +90,7 @@ program; `tessel.toml` says which version of Tessel builds it.
 ## Tests
 
 ```sh
-tessel build . -o adder
+tessel build . -o pytessel
 tests/run.sh             # each tests/*.py, compared with what CPython prints
 tests/run.sh --update    # write the expected output again (needs python3)
 ```
