@@ -1,0 +1,1021 @@
+// The methods of Python's built-in types: "a,b".split(","), xs.append(1), …
+
+// Whether a built-in type has a method of this name.
+fn hasMethod(_ type: String, _ name: String) -> Bool {
+    match type {
+        "str" -> ["upper", "lower", "strip", "lstrip", "rstrip", "split", "rsplit", "join", "replace", "startswith",
+                  "endswith", "find", "rfind", "index", "rindex", "count", "format", "isdigit", "isalpha", "isalnum",
+                  "isspace", "isupper", "islower", "isnumeric", "isdecimal", "title", "capitalize", "swapcase",
+                  "center", "ljust", "rjust", "zfill", "splitlines", "partition", "rpartition", "casefold",
+                  "removeprefix", "removesuffix", "encode", "isidentifier"].contains(name)
+        "list" -> ["append", "extend", "insert", "remove", "pop", "clear", "index", "count", "sort", "reverse", "copy"].contains(name)
+        "dict" -> ["get", "keys", "values", "items", "pop", "setdefault", "update", "clear", "copy", "popitem", "fromkeys"].contains(name)
+        "set" -> ["add", "remove", "discard", "pop", "clear", "copy", "union", "intersection", "difference",
+                  "symmetric_difference", "update", "issubset", "issuperset", "isdisjoint",
+                  "intersection_update", "difference_update"].contains(name)
+        "tuple" -> ["count", "index"].contains(name)
+        "TextIOWrapper" -> ["read", "readline", "readlines", "write", "writelines", "close", "flush"].contains(name)
+        "int" -> ["bit_length", "is_integer", "conjugate"].contains(name)
+        "float" -> ["is_integer", "conjugate"].contains(name)
+        "bool" -> ["bit_length"].contains(name)
+        _ -> {
+            if name == "__next__" || name == "__iter__" {
+                // (Iterators: generators, map, zip, …)
+                type != "NoneType" && type != "function"
+            } else {
+                false
+            }
+        }
+    }
+}
+
+fn isSpace(_ c: String) -> Bool {
+    c == " " || c == "\n" || c == "\t" || c == "\r" || ordOf(c) == 11 || ordOf(c) == 12
+}
+
+// s.strip(chars): without the characters of `chars` (or spaces, for "") at
+// the ends asked for.
+fn stripText(_ s: String, _ chars: String, _ left: Bool, _ right: Bool) -> String {
+    let c = s.characters
+    var from = 0
+    var to = c.count
+    if left {
+        while from < to && (if chars == "" { isSpace(c[from]) } else { chars.contains(c[from]) }) {
+            from += 1
+        }
+    }
+    if right {
+        while to > from && (if chars == "" { isSpace(c[to - 1]) } else { chars.contains(c[to - 1]) }) {
+            to -= 1
+        }
+    }
+    if from == 0 && to == c.count {
+        return s
+    }
+    c.slice(from: from, to: to).joined()
+}
+
+fn isLetter(_ c: String) -> Bool {
+    c.uppercase() != c.lowercase()
+}
+
+// Whether every character of a text passes a test (and there is one).
+fn allCharacters(_ s: String, _ kind: String) -> Bool {
+    if s == "" {
+        return false
+    }
+    var cased = false
+    for c in s.characters {
+        match kind {
+            "digit" -> {
+                if !isDigitChar(c) {
+                    return false
+                }
+            }
+            "alpha" -> {
+                if !isLetter(c) {
+                    return false
+                }
+            }
+            "alnum" -> {
+                if !isLetter(c) && !isDigitChar(c) {
+                    return false
+                }
+            }
+            "space" -> {
+                if !isSpace(c) {
+                    return false
+                }
+            }
+            "upper" -> {
+                if isLetter(c) {
+                    if c != c.uppercase() {
+                        return false
+                    }
+                    cased = true
+                }
+            }
+            _ -> {
+                if isLetter(c) {
+                    if c != c.lowercase() {
+                        return false
+                    }
+                    cased = true
+                }
+            }
+        }
+    }
+    if kind == "upper" || kind == "lower" {
+        return cased
+    }
+    true
+}
+
+fn textArg(_ it: bind Interp, _ args: [Value], _ at: Int, _ method: String) -> String? {
+    if at < args.count {
+        match args[at] {
+            .str(s) -> { return s }
+            _ -> {}
+        }
+        it.throw("TypeError", "{method}() argument {at + 1} must be str, not {typeName(it, args[at])}")
+        return nil
+    }
+    it.throw("TypeError", "{method}() takes at least {at + 1} argument{if at == 0 { "" } else { "s" }} ({args.count} given)")
+    nil
+}
+
+// The first place `part` is in `s` at or after `from` (-1 if none).
+fn findFrom(_ s: String, _ part: String, _ from: Int) -> Int {
+    if from <= 0 {
+        return s.find(part) ?? -1
+    }
+    let count = s.count
+    if from > count {
+        return -1
+    }
+    if let at = s.substring(from: from, to: count).find(part) {
+        return at + from
+    }
+    -1
+}
+
+fn splitText(_ it: bind Interp, _ s: String, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
+    var separator = Value.none
+    var limit = -1
+    if !args.isEmpty {
+        separator = args[0]
+    }
+    if args.count > 1 {
+        limit = intOf(args[1]) ?? -1
+    }
+    let named = keyword(kwNames, kwValues, "sep")
+    if named != Value.absent {
+        separator = named
+    }
+    match keyword(kwNames, kwValues, "maxsplit") {
+        .int(i) -> { limit = i }
+        _ -> {}
+    }
+    var parts: [String] = []
+    match separator {
+        .str(sep) -> {
+            if sep == "" {
+                return it.throw("ValueError", "empty separator")
+            }
+            if limit < 0 {
+                parts = s.split(sep)
+            } else {
+                var rest = s
+                var done = 0
+                while done < limit {
+                    if let at = rest.find(sep) {
+                        parts.append(rest.substring(from: 0, to: at))
+                        rest = rest.substring(from: at + sep.count, to: rest.count)
+                        done += 1
+                    } else {
+                        break
+                    }
+                }
+                parts.append(rest)
+            }
+        }
+        _ -> {
+            // No separator: the words between runs of spaces.
+            if limit < 0 {
+                parts = s.words()
+            } else {
+                let c = s.characters
+                var i = 0
+                var done = 0
+                while i < c.count {
+                    while i < c.count && isSpace(c[i]) {
+                        i += 1
+                    }
+                    if i >= c.count {
+                        break
+                    }
+                    if done == limit {
+                        parts.append(stripText(c.slice(from: i, to: c.count).joined(), "", false, true))
+                        break
+                    }
+                    var word = ""
+                    while i < c.count && !isSpace(c[i]) {
+                        word += c[i]
+                        i += 1
+                    }
+                    parts.append(word)
+                    done += 1
+                }
+            }
+        }
+    }
+    var out: [Value] = []
+    for p in parts {
+        out.append(.str(s: p))
+    }
+    it.newList(out)
+}
+
+fn startsOrEnds(_ it: bind Interp, _ s: String, _ arg: Value, _ starts: Bool) -> Value {
+    match arg {
+        .str(part) -> .bool(b: if starts { s.hasPrefix(part) } else { s.hasSuffix(part) })
+        .tuple(id) -> {
+            for option in it.lists[id] {
+                match option {
+                    .str(part) -> {
+                        if (starts && s.hasPrefix(part)) || (!starts && s.hasSuffix(part)) {
+                            return .bool(b: true)
+                        }
+                    }
+                    _ -> {}
+                }
+            }
+            Value.bool(b: false)
+        }
+        _ -> it.throw("TypeError", "{if starts { "startswith" } else { "endswith" }} first arg must be str or a tuple of str, not {typeName(it, arg)}")
+    }
+}
+
+fn padText(_ s: String, _ width: Int, _ fill: String, _ align: String) -> String {
+    let count = s.count
+    if width <= count {
+        return s
+    }
+    let total = width - count
+    if align == "<" {
+        return s + fill.repeated(total)
+    }
+    if align == ">" {
+        return fill.repeated(total) + s
+    }
+    // Centered. str.center ("c") puts the odd one left when the width is
+    // odd; format specs ("^") always put it right. Both as Python does.
+    let left = if align == "c" { total / 2 + (total & width & 1) } else { total / 2 }
+    fill.repeated(left) + s + fill.repeated(total - left)
+}
+
+fn strMethod(_ it: bind Interp, _ s: String, _ name: String, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
+    match name {
+        "join" -> {
+            if !arity(it, name, args, 1, 1) {
+                return Value.none
+            }
+            let items = iterate(it, args[0])
+            if it.signal != .none {
+                return Value.none
+            }
+            var parts: [String] = []
+            for i in items.indices {
+                match items[i] {
+                    .str(part) -> { parts.append(part) }
+                    _ -> { return it.throw("TypeError", "sequence item {i}: expected str instance, {typeName(it, items[i])} found") }
+                }
+            }
+            Value.str(s: parts.joined(separator: s))
+        }
+        "split", "rsplit" -> splitText(it, s, args, kwNames, kwValues)
+        "strip" -> .str(s: stripText(s, if args.isEmpty { "" } else { textArg(it, args, 0, name) ?? "" }, true, true))
+        "lstrip" -> .str(s: stripText(s, if args.isEmpty { "" } else { textArg(it, args, 0, name) ?? "" }, true, false))
+        "rstrip" -> .str(s: stripText(s, if args.isEmpty { "" } else { textArg(it, args, 0, name) ?? "" }, false, true))
+        "upper" -> .str(s: s.uppercase())
+        "lower", "casefold" -> .str(s: s.lowercase())
+        "replace" -> {
+            if let old = textArg(it, args, 0, name) {
+                if let new = textArg(it, args, 1, name) {
+                    if args.count > 2 {
+                        // Only the first `count` of them.
+                        var left = intOf(args[2]) ?? -1
+                        if left >= 0 && old != "" {
+                            var out = ""
+                            var rest = s
+                            while left > 0 {
+                                if let at = rest.find(old) {
+                                    out += rest.substring(from: 0, to: at) + new
+                                    rest = rest.substring(from: at + old.count, to: rest.count)
+                                    left -= 1
+                                } else {
+                                    break
+                                }
+                            }
+                            return .str(s: out + rest)
+                        }
+                    }
+                    if old == "" {
+                        // ("abc".replace("", "-") puts it between every character.)
+                        return .str(s: new + s.characters.joined(separator: new) + new)
+                    }
+                    return .str(s: s.replace(old, with: new))
+                }
+            }
+            Value.none
+        }
+        "startswith" -> {
+            if !arity(it, name, args, 1, 3) {
+                return Value.none
+            }
+            startsOrEnds(it, s, args[0], true)
+        }
+        "endswith" -> {
+            if !arity(it, name, args, 1, 3) {
+                return Value.none
+            }
+            startsOrEnds(it, s, args[0], false)
+        }
+        "find", "index" -> {
+            if let part = textArg(it, args, 0, name) {
+                var from = 0
+                if args.count > 1 {
+                    from = intOf(args[1]) ?? 0
+                    if from < 0 {
+                        from = if from + s.count < 0 { 0 } else { from + s.count }
+                    }
+                }
+                let at = findFrom(s, part, from)
+                if at < 0 && name == "index" {
+                    return it.throw("ValueError", "substring not found")
+                }
+                return .int(i: at)
+            }
+            Value.none
+        }
+        "rfind", "rindex" -> {
+            if let part = textArg(it, args, 0, name) {
+                let at = s.findLast(part) ?? -1
+                if at < 0 && name == "rindex" {
+                    return it.throw("ValueError", "substring not found")
+                }
+                return .int(i: at)
+            }
+            Value.none
+        }
+        "count" -> {
+            if let part = textArg(it, args, 0, name) {
+                if part == "" {
+                    return .int(i: s.count + 1)
+                }
+                return .int(i: s.occurrences(of: part))
+            }
+            Value.none
+        }
+        "format" -> .str(s: formatText(it, s, args, kwNames, kwValues))
+        "isdigit", "isnumeric", "isdecimal" -> .bool(b: allCharacters(s, "digit"))
+        "isalpha" -> .bool(b: allCharacters(s, "alpha"))
+        "isalnum" -> .bool(b: allCharacters(s, "alnum"))
+        "isspace" -> .bool(b: allCharacters(s, "space"))
+        "isupper" -> .bool(b: allCharacters(s, "upper"))
+        "islower" -> .bool(b: allCharacters(s, "lower"))
+        "isidentifier" -> {
+            let c = s.characters
+            var ok = !c.isEmpty && isNameStart(c[0])
+            for x in c {
+                if !isNameChar(x) {
+                    ok = false
+                }
+            }
+            Value.bool(b: ok)
+        }
+        "title" -> {
+            var out = ""
+            var inWord = false
+            for c in s.characters {
+                if isLetter(c) {
+                    out += if inWord { c.lowercase() } else { c.uppercase() }
+                    inWord = true
+                } else {
+                    out += c
+                    inWord = false
+                }
+            }
+            Value.str(s: out)
+        }
+        "capitalize" -> {
+            let c = s.characters
+            if c.isEmpty {
+                return .str(s: "")
+            }
+            Value.str(s: c[0].uppercase() + c.slice(from: 1, to: c.count).joined().lowercase())
+        }
+        "swapcase" -> {
+            var out = ""
+            for c in s.characters {
+                out += if c == c.uppercase() { c.lowercase() } else { c.uppercase() }
+            }
+            Value.str(s: out)
+        }
+        "center", "ljust", "rjust" -> {
+            if !arity(it, name, args, 1, 2) {
+                return Value.none
+            }
+            let width = intOf(args[0]) ?? 0
+            var fill = " "
+            if args.count > 1 {
+                fill = textArg(it, args, 1, name) ?? " "
+                if fill.count != 1 {
+                    return it.throw("TypeError", "The fill character must be exactly one character long")
+                }
+            }
+            Value.str(s: padText(s, width, fill, if name == "center" { "c" } else if name == "ljust" { "<" } else { ">" }))
+        }
+        "zfill" -> {
+            if !arity(it, name, args, 1, 1) {
+                return Value.none
+            }
+            let width = intOf(args[0]) ?? 0
+            let count = s.count
+            if width <= count {
+                return .str(s: s)
+            }
+            if s.hasPrefix("-") || s.hasPrefix("+") {
+                return .str(s: s.substring(from: 0, to: 1) + "0".repeated(width - count) + s.substring(from: 1, to: count))
+            }
+            Value.str(s: "0".repeated(width - count) + s)
+        }
+        "splitlines" -> {
+            var out: [Value] = []
+            for l in s.lines() {
+                out.append(.str(s: l))
+            }
+            it.newList(out)
+        }
+        "partition", "rpartition" -> {
+            if let sep = textArg(it, args, 0, name) {
+                if sep == "" {
+                    return it.throw("ValueError", "empty separator")
+                }
+                let at = if name == "partition" { s.find(sep) } else { s.findLast(sep) }
+                if let i = at {
+                    return it.newTuple([.str(s: s.substring(from: 0, to: i)), .str(s: sep),
+                                        Value.str(s: s.substring(from: i + sep.count, to: s.count))])
+                }
+                if name == "partition" {
+                    return it.newTuple([.str(s: s), .str(s: ""), .str(s: "")])
+                }
+                return it.newTuple([.str(s: ""), .str(s: ""), .str(s: s)])
+            }
+            Value.none
+        }
+        "removeprefix" -> {
+            if let part = textArg(it, args, 0, name) {
+                if part != "" && s.hasPrefix(part) {
+                    return .str(s: s.substring(from: part.count, to: s.count))
+                }
+                return .str(s: s)
+            }
+            Value.none
+        }
+        "removesuffix" -> {
+            if let part = textArg(it, args, 0, name) {
+                if part != "" && s.hasSuffix(part) {
+                    return .str(s: s.substring(from: 0, to: s.count - part.count))
+                }
+                return .str(s: s)
+            }
+            Value.none
+        }
+        "encode" -> {
+            // (Adder has no bytes type: the bytes' numbers, in a list.)
+            var out: [Value] = []
+            for b in Data(text: s).bytes {
+                out.append(.int(i: b))
+            }
+            it.newList(out)
+        }
+        _ -> it.throw("AttributeError", "'str' object has no attribute '{name}'")
+    }
+}
+
+fn listMethod(_ it: bind Interp, _ id: Int, _ name: String, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
+    match name {
+        "append" -> {
+            if !arity(it, name, args, 1, 1) {
+                return Value.none
+            }
+            it.lists[id].append(args[0])
+            Value.none
+        }
+        "pop" -> {
+            if !arity(it, name, args, 0, 1) {
+                return Value.none
+            }
+            let count = it.lists[id].count
+            if count == 0 {
+                return it.throw("IndexError", "pop from empty list")
+            }
+            if args.isEmpty {
+                return it.lists[id].removeLast()
+            }
+            if let i = intOf(args[0]) {
+                if let at = position(i, count) {
+                    return it.lists[id].remove(at: at)
+                }
+                return it.throw("IndexError", "pop index out of range")
+            }
+            it.throw("TypeError", "'{typeName(it, args[0])}' object cannot be interpreted as an integer")
+        }
+        "extend" -> {
+            if !arity(it, name, args, 1, 1) {
+                return Value.none
+            }
+            let more = iterate(it, args[0])
+            if it.signal != .none {
+                return Value.none
+            }
+            it.lists[id].appendAll(more)
+            Value.none
+        }
+        "insert" -> {
+            if !arity(it, name, args, 2, 2) {
+                return Value.none
+            }
+            let count = it.lists[id].count
+            var at = intOf(args[0]) ?? 0
+            if at < 0 {
+                at = if at + count < 0 { 0 } else { at + count }
+            }
+            if at > count {
+                at = count
+            }
+            it.lists[id].insert(args[1], at: at)
+            Value.none
+        }
+        "remove" -> {
+            if !arity(it, name, args, 1, 1) {
+                return Value.none
+            }
+            for i in it.lists[id].indices {
+                if pyEquals(it, it.lists[id][i], args[0]) {
+                    it.lists[id].remove(at: i)
+                    return Value.none
+                }
+            }
+            it.throw("ValueError", "list.remove(x): x not in list")
+        }
+        "index" -> {
+            if !arity(it, name, args, 1, 3) {
+                return Value.none
+            }
+            var from = 0
+            if args.count > 1 {
+                from = intOf(args[1]) ?? 0
+            }
+            for i in it.lists[id].indices {
+                if i >= from && pyEquals(it, it.lists[id][i], args[0]) {
+                    return .int(i: i)
+                }
+            }
+            it.throw("ValueError", "{toRepr(it, args[0])} is not in list")
+        }
+        "count" -> {
+            if !arity(it, name, args, 1, 1) {
+                return Value.none
+            }
+            var n = 0
+            for item in it.lists[id] {
+                if pyEquals(it, item, args[0]) {
+                    n += 1
+                }
+            }
+            Value.int(i: n)
+        }
+        "sort" -> {
+            let reverse = keyword(kwNames, kwValues, "reverse")
+            let backwards = reverse != Value.absent && truthy(it, reverse)
+            let sorted = sortValues(it, it.lists[id], keyword(kwNames, kwValues, "key"), backwards)
+            if it.signal != .none {
+                return Value.none
+            }
+            it.lists[id] = sorted
+            Value.none
+        }
+        "reverse" -> {
+            it.lists[id] = it.lists[id].reversed()
+            Value.none
+        }
+        "clear" -> {
+            it.lists[id] = []
+            Value.none
+        }
+        "copy" -> it.newList(it.lists[id])
+        _ -> it.throw("AttributeError", "'list' object has no attribute '{name}'")
+    }
+}
+
+fn dictMethod(_ it: bind Interp, _ id: Int, _ name: String, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
+    match name {
+        "get" -> {
+            if !arity(it, name, args, 1, 2) {
+                return Value.none
+            }
+            let h = hashKey(it, args[0])
+            if it.signal != .none {
+                return Value.none
+            }
+            if let at = it.dicts[id].index[h] {
+                return it.dicts[id].vals[at]
+            }
+            if args.count > 1 { args[1] } else { Value.none }
+        }
+        "items" -> {
+            let keys = dictKeys(it.dicts[id])
+            let values = dictValues(it.dicts[id])
+            var out: [Value] = []
+            for i in keys.indices {
+                out.append(it.newTuple([keys[i], values[i]]))
+            }
+            it.newList(out)
+        }
+        "keys" -> it.newList(dictKeys(it.dicts[id]))
+        "values" -> it.newList(dictValues(it.dicts[id]))
+        "pop" -> {
+            if !arity(it, name, args, 1, 2) {
+                return Value.none
+            }
+            let h = hashKey(it, args[0])
+            if it.signal != .none {
+                return Value.none
+            }
+            if let at = it.dicts[id].index[h] {
+                let v = it.dicts[id].vals[at]
+                dictRemove(it.dicts[id], h)
+                return v
+            }
+            if args.count > 1 {
+                return args[1]
+            }
+            throwValue(it, "KeyError", args[0])
+        }
+        "setdefault" -> {
+            if !arity(it, name, args, 1, 2) {
+                return Value.none
+            }
+            let h = hashKey(it, args[0])
+            if it.signal != .none {
+                return Value.none
+            }
+            if let at = it.dicts[id].index[h] {
+                return it.dicts[id].vals[at]
+            }
+            let v = if args.count > 1 { args[1] } else { Value.none }
+            dictSet(it.dicts[id], args[0], h, v)
+            v
+        }
+        "update" -> {
+            if !args.isEmpty {
+                dictUpdate(it, id, args[0])
+                if it.signal != .none {
+                    return Value.none
+                }
+            }
+            for i in kwNames.indices {
+                dictSet(it.dicts[id], .str(s: kwNames[i]), "s" + kwNames[i], kwValues[i])
+            }
+            Value.none
+        }
+        "clear" -> {
+            it.dicts[id] = PyDict()
+            Value.none
+        }
+        "copy" -> {
+            let copy = it.newDict()
+            it.dicts[copy] = it.dicts[id]
+            Value.dict(id: copy)
+        }
+        "popitem" -> {
+            let keys = dictKeys(it.dicts[id])
+            if let last = keys.last {
+                let h = hashKey(it, last)
+                let v = dictGet(it.dicts[id], h)
+                dictRemove(it.dicts[id], h)
+                return it.newTuple([last, v])
+            }
+            it.throw("KeyError", "popitem(): dictionary is empty")
+        }
+        _ -> it.throw("AttributeError", "'dict' object has no attribute '{name}'")
+    }
+}
+
+fn setMethod(_ it: bind Interp, _ id: Int, _ receiver: Value, _ name: String, _ args: [Value]) -> Value {
+    match name {
+        "add" -> {
+            if !arity(it, name, args, 1, 1) {
+                return Value.none
+            }
+            let h = hashKey(it, args[0])
+            if it.signal == .none {
+                dictSet(it.dicts[id], args[0], h, Value.none)
+            }
+            Value.none
+        }
+        "remove", "discard" -> {
+            if !arity(it, name, args, 1, 1) {
+                return Value.none
+            }
+            let h = hashKey(it, args[0])
+            if it.signal != .none {
+                return Value.none
+            }
+            if !dictRemove(it.dicts[id], h) && name == "remove" {
+                return throwValue(it, "KeyError", args[0])
+            }
+            Value.none
+        }
+        "pop" -> {
+            let keys = dictKeys(it.dicts[id])
+            if let first = keys.first {
+                dictRemove(it.dicts[id], hashKey(it, first))
+                return first
+            }
+            it.throw("KeyError", "pop from an empty set")
+        }
+        "clear" -> {
+            it.dicts[id] = PyDict()
+            Value.none
+        }
+        "copy" -> {
+            let copy = it.newDict()
+            it.dicts[copy] = it.dicts[id]
+            Value.set(id: copy)
+        }
+        "union", "intersection", "difference", "symmetric_difference" -> {
+            var result = receiver
+            for a in args {
+                let items = iterate(it, a)
+                if it.signal != .none {
+                    return Value.none
+                }
+                let other = makeSet(it, items)
+                if it.signal != .none {
+                    return Value.none
+                }
+                let op = if name == "union" { BinOp.bitOr } else if name == "intersection" { BinOp.bitAnd } else if name == "difference" { BinOp.sub } else { BinOp.bitXor }
+                result = binaryOp(it, op, result, other)
+            }
+            if args.isEmpty {
+                let copy = it.newDict()
+                it.dicts[copy] = it.dicts[id]
+                return .set(id: copy)
+            }
+            result
+        }
+        "update", "intersection_update", "difference_update" -> {
+            for a in args {
+                let items = iterate(it, a)
+                if it.signal != .none {
+                    return Value.none
+                }
+                if name == "update" {
+                    for item in items {
+                        let h = hashKey(it, item)
+                        if it.signal != .none {
+                            return Value.none
+                        }
+                        dictSet(it.dicts[id], item, h, Value.none)
+                    }
+                } else {
+                    let other = makeSet(it, items)
+                    if it.signal != .none {
+                        return Value.none
+                    }
+                    let op = if name == "intersection_update" { BinOp.bitAnd } else { BinOp.sub }
+                    match binaryOp(it, op, receiver, other) {
+                        .set(result) -> { it.dicts[id] = it.dicts[result] }
+                        _ -> {}
+                    }
+                }
+            }
+            Value.none
+        }
+        "issubset", "issuperset", "isdisjoint" -> {
+            if !arity(it, name, args, 1, 1) {
+                return Value.none
+            }
+            let items = iterate(it, args[0])
+            if it.signal != .none {
+                return Value.none
+            }
+            match makeSet(it, items) {
+                .set(other) -> {
+                    if name == "issubset" {
+                        return .bool(b: isSubset(it, id, other))
+                    }
+                    if name == "issuperset" {
+                        return .bool(b: isSubset(it, other, id))
+                    }
+                    for (h, _) in it.dicts[id].index {
+                        if it.dicts[other].index.contains(key: h) {
+                            return .bool(b: false)
+                        }
+                    }
+                    Value.bool(b: true)
+                }
+                _ -> .none
+            }
+        }
+        _ -> it.throw("AttributeError", "'set' object has no attribute '{name}'")
+    }
+}
+
+fn fileMethod(_ it: bind Interp, _ id: Int, _ receiver: Value, _ name: String, _ args: [Value]) -> Value {
+    if it.files[id].closed && name != "close" {
+        return it.throw("ValueError", "I/O operation on closed file.")
+    }
+    match name {
+        "read" -> {
+            let from = it.files[id].pos
+            let lines = it.files[id].lines
+            it.files[id].pos = lines.count
+            Value.str(s: lines.slice(from: from, to: lines.count).joined())
+        }
+        "readline" -> {
+            let at = it.files[id].pos
+            if at < it.files[id].lines.count {
+                it.files[id].pos = at + 1
+                return .str(s: it.files[id].lines[at])
+            }
+            Value.str(s: "")
+        }
+        "readlines" -> it.newList(iterate(it, receiver))
+        "write" -> {
+            if let text = textArg(it, args, 0, name) {
+                if it.files[id].mode.contains("r") && !it.files[id].mode.contains("+") {
+                    return it.throw("OSError", "not writable")
+                }
+                it.files[id].pending += text
+                return .int(i: text.count)
+            }
+            Value.none
+        }
+        "writelines" -> {
+            if !arity(it, name, args, 1, 1) {
+                return Value.none
+            }
+            let items = iterate(it, args[0])
+            if it.signal != .none {
+                return Value.none
+            }
+            for item in items {
+                it.files[id].pending += toStr(it, item)
+            }
+            Value.none
+        }
+        "flush" -> {
+            flushFile(it, id)
+            Value.none
+        }
+        "close" -> {
+            closeFile(it, id)
+            Value.none
+        }
+        "__enter__" -> receiver
+        "__exit__" -> {
+            closeFile(it, id)
+            Value.none
+        }
+        _ -> it.throw("AttributeError", "'TextIOWrapper' object has no attribute '{name}'")
+    }
+}
+
+// A type's method called through the type: str.upper("a"), dict.fromkeys(keys).
+fn typeMethod(_ it: bind Interp, _ type: String, _ name: String, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
+    if type == "dict" && name == "fromkeys" {
+        if !arity(it, "fromkeys", args, 1, 2) {
+            return Value.none
+        }
+        let keys = iterate(it, args[0])
+        if it.signal != .none {
+            return Value.none
+        }
+        let id = it.newDict()
+        for k in keys {
+            let h = hashKey(it, k)
+            if it.signal != .none {
+                return Value.none
+            }
+            dictSet(it.dicts[id], k, h, if args.count > 1 { args[1] } else { Value.none })
+        }
+        return .dict(id: id)
+    }
+    if args.isEmpty {
+        return it.throw("TypeError", "unbound method {type}.{name}() needs an argument")
+    }
+    callMethod(it, args[0], name, args.dropFirst(), kwNames, kwValues)
+}
+
+// receiver.name(args): a method call.
+fn callMethod(_ it: bind Interp, _ receiver: Value, _ name: String, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
+    match receiver {
+        .instance(id) -> {
+            if let own = it.instances[id].fields[name] {
+                return it.callValue(own, args, kwNames, kwValues)
+            }
+            let cls = it.instances[id].cls
+            let found = classAttr(it, cls, name)
+            match found {
+                .function(fid) -> {
+                    var all = [receiver]
+                    all.appendAll(args)
+                    it.callClosure(fid, all, kwNames, kwValues)
+                }
+                .absent -> {
+                    let f = getAttr(it, receiver, name)
+                    if it.signal != .none {
+                        return Value.none
+                    }
+                    it.callValue(f, args, kwNames, kwValues)
+                }
+                _ -> {
+                    let f = bindAttr(it, found, receiver, cls)
+                    if it.signal != .none {
+                        return Value.none
+                    }
+                    it.callValue(f, args, kwNames, kwValues)
+                }
+            }
+        }
+        .list(id) -> listMethod(it, id, name, args, kwNames, kwValues)
+        .str(s) -> strMethod(it, s, name, args, kwNames, kwValues)
+        .dict(id) -> dictMethod(it, id, name, args, kwNames, kwValues)
+        .set(id) -> setMethod(it, id, receiver, name, args)
+        .module(m) -> moduleCall(it, m, name, args, kwNames, kwValues)
+        .tuple(id) -> {
+            if name == "count" && args.count == 1 {
+                var n = 0
+                for item in it.lists[id] {
+                    if pyEquals(it, item, args[0]) {
+                        n += 1
+                    }
+                }
+                return .int(i: n)
+            }
+            if name == "index" && args.count >= 1 {
+                for i in it.lists[id].indices {
+                    if pyEquals(it, it.lists[id][i], args[0]) {
+                        return .int(i: i)
+                    }
+                }
+                return it.throw("ValueError", "tuple.index(x): x not in tuple")
+            }
+            it.throw("AttributeError", "'tuple' object has no attribute '{name}'")
+        }
+        .file(id) -> fileMethod(it, id, receiver, name, args)
+        .iterator(_) -> {
+            if name == "__next__" {
+                return callBuiltin(it, "next", [receiver], [], [])
+            }
+            if name == "__iter__" {
+                return receiver
+            }
+            it.throw("AttributeError", "'{typeName(it, receiver)}' object has no attribute '{name}'")
+        }
+        .wrapper(kind, cell) -> {
+            if kind == 2 && name == "setter" && args.count == 1 {
+                // @x.setter: the property gets the function that sets it.
+                it.setters[cell] = args[0]
+                return receiver
+            }
+            it.throw("AttributeError", "'{typeName(it, receiver)}' object has no attribute '{name}'")
+        }
+        .int(i) -> {
+            if name == "bit_length" {
+                var n = if i < 0 { (0).wrappingSubtract(i) } else { i }
+                var bits = 0
+                while n > 0 {
+                    bits += 1
+                    n = n >> 1
+                }
+                return .int(i: if i == minInt() { 64 } else { bits })
+            }
+            if name == "is_integer" {
+                return .bool(b: true)
+            }
+            if name == "conjugate" {
+                return receiver
+            }
+            let f = getAttr(it, receiver, name)
+            if it.signal != .none {
+                return Value.none
+            }
+            it.callValue(f, args, kwNames, kwValues)
+        }
+        .float(f) -> {
+            if name == "is_integer" {
+                return .bool(b: f.isFinite && f == floor(f))
+            }
+            if name == "conjugate" {
+                return receiver
+            }
+            let f = getAttr(it, receiver, name)
+            if it.signal != .none {
+                return Value.none
+            }
+            it.callValue(f, args, kwNames, kwValues)
+        }
+        _ -> {
+            let f = getAttr(it, receiver, name)
+            if it.signal != .none {
+                return Value.none
+            }
+            it.callValue(f, args, kwNames, kwValues)
+        }
+    }
+}

@@ -1,0 +1,1569 @@
+// The interpreter: it walks the syntax tree. `eval` gives an expression's
+// value and `exec` runs a statement.
+//
+// Python's `break`, `continue`, `return` and exceptions leave what's running
+// from the inside: here `signal` says that one of them is on its way, and
+// everything checks it after each step and gets out of the way.
+
+struct Interp {
+    prog: Program
+
+    // Where Python's objects live (see values.tsl).
+    lists: [[Value]] = []
+    dicts: [PyDict] = []
+    closures: [Closure] = []
+    bounds: [Bound] = []
+    classes: [Klass] = []
+    instances: [Instance] = []
+    iterators: [PyIter] = []
+    files: [PyFile] = []
+    cells: [Value] = []
+    // The functions that set properties (`@x.setter`), by the property's cell.
+    setters: [Int: Value] = [:]
+
+    // Variables: `envs[env]` is where the running code's are.
+    envs: [Env] = []
+    freeEnvs: [Int] = []
+    env: Int = 0
+
+    signal: Signal
+    // The value being returned, and the exception being raised.
+    retval: Value
+    exc: Value
+
+    // The call that's running: how deep, in what function, of what class.
+    depth: Int = 0
+    line: Int = 0
+    funcName: String = "<module>"
+    curClass: Int = -1
+    curSelf: Value
+
+    // For each generator function running, the list of what it yields.
+    yields: [Int] = []
+    // The exceptions being handled by `except` blocks (for a bare `raise`).
+    handling: [Value] = []
+    // Where the exception that's raised came through: lines and functions.
+    traceLines: [Int] = []
+    traceNames: [String] = []
+
+    // The built-in exception classes, by name, and the modules imported
+    // from files, by name (their `envs`).
+    classIds: [String: Int] = [:]
+    modules: [String: Int] = [:]
+    scriptDir: String = ""
+    scriptName: String = "<stdin>"
+    // The program's text, by line, for showing where an error was.
+    sourceLines: [String] = []
+    argv: [String] = []
+    // Set by exit(): the program is to stop, with this status.
+    exiting: Bool = false
+    exitCode: Int = 0
+
+    // ---- making values ----
+
+    fn newList(_ items: [Value]) -> Value {
+        lists.append(items)
+        Value.list(id: lists.count - 1)
+    }
+
+    fn newTuple(_ items: [Value]) -> Value {
+        lists.append(items)
+        Value.tuple(id: lists.count - 1)
+    }
+
+    fn newDict() -> Int {
+        dicts.append(PyDict())
+        dicts.count - 1
+    }
+
+    fn newIterator(_ items: [Value], _ kind: String) -> Value {
+        iterators.append(PyIter(items: items, pos: 0, kind: kind))
+        Value.iterator(id: iterators.count - 1)
+    }
+
+    fn newBound(_ receiver: Value, _ method: Value) -> Value {
+        bounds.append(Bound(receiver: receiver, method: method))
+        Value.bound(id: bounds.count - 1)
+    }
+
+    fn newCell(_ v: Value) -> Int {
+        cells.append(v)
+        cells.count - 1
+    }
+
+    // ---- exceptions ----
+
+    // Raises a built-in exception: `throw("TypeError", "…")`. Gives None, so
+    // it can be what a function returns.
+    fn throw(_ kind: String, _ message: String) -> Value {
+        let cls = classIds[kind] ?? 0
+        var fields: [String: Value] = [:]
+        fields["args"] = newTuple([.str(s: message)])
+        instances.append(Instance(cls: cls, fields: fields))
+        raise(.instance(id: instances.count - 1))
+        Value.none
+    }
+
+    fn raise(_ exception: Value) {
+        exc = exception
+        signal = .raising
+        traceLines = [line]
+        traceNames = [funcName]
+    }
+
+    // ---- variables ----
+
+    fn newEnv(_ parent: Int) -> Int {
+        if let id = freeEnvs.last {
+            freeEnvs.removeLast()
+            envs[id].parent = parent
+            return id
+        }
+        envs.append(Env(parent: parent))
+        envs.count - 1
+    }
+
+    // Done with a call's variables, unless a function made there keeps them.
+    fn releaseEnv(_ e: Int) {
+        if envs[e].captured {
+            return
+        }
+        envs[e].vars = [:]
+        if !envs[e].globals.isEmpty {
+            envs[e].globals = []
+        }
+        if !envs[e].nonlocals.isEmpty {
+            envs[e].nonlocals = []
+        }
+        envs[e].isClass = false
+        freeEnvs.append(e)
+    }
+
+    fn lookup(_ id: String) -> Value {
+        var e = env
+        while e >= 0 {
+            if let v = envs[e].vars[id] {
+                return v
+            }
+            e = envs[e].parent
+        }
+        throw("NameError", "name '{id}' is not defined")
+    }
+
+    // The module's variables, from anywhere in it (the builtins' are above).
+    fn globalEnv() -> Int {
+        var e = env
+        while envs[e].parent > 0 {
+            e = envs[e].parent
+        }
+        e
+    }
+
+    fn setVar(_ id: String, _ v: Value) {
+        if !envs[env].globals.isEmpty && envs[env].globals.contains(id) {
+            envs[globalEnv()].vars[id] = v
+            return
+        }
+        if !envs[env].nonlocals.isEmpty && envs[env].nonlocals.contains(id) {
+            var e = envs[env].parent
+            while e > 0 {
+                if envs[e].vars.contains(key: id) {
+                    envs[e].vars[id] = v
+                    return
+                }
+                e = envs[e].parent
+            }
+        }
+        envs[env].vars[id] = v
+    }
+
+    // ---- expressions ----
+
+    fn eval(_ n: Int) -> Value {
+        match prog.nodes[n] {
+            .name(id) -> {
+                var e = env
+                while e >= 0 {
+                    if let v = envs[e].vars[id] {
+                        return v
+                    }
+                    e = envs[e].parent
+                }
+                line = prog.lines[n]
+                throw("NameError", "name '{id}' is not defined")
+            }
+            .intLit(v) -> .int(i: v)
+            .floatLit(v) -> .float(f: v)
+            .strLit(v) -> .str(s: v)
+            .noneLit -> .none
+            .trueLit -> .bool(b: true)
+            .falseLit -> .bool(b: false)
+            .binary(op, l, r) -> {
+                let a = eval(l)
+                if signal != .none {
+                    return .none
+                }
+                let b = eval(r)
+                if signal != .none {
+                    return .none
+                }
+                // Whole numbers, the common case; everything else (and
+                // results that don't fit) goes to `binaryOp`.
+                match a {
+                    .int(x) -> {
+                        match b {
+                            .int(y) -> {
+                                match op {
+                                    .add -> {
+                                        let sum = x.wrappingAdd(y)
+                                        if ((x ^ sum) & (y ^ sum)) >= 0 {
+                                            return .int(i: sum)
+                                        }
+                                    }
+                                    .sub -> {
+                                        let difference = x.wrappingSubtract(y)
+                                        if ((x ^ y) & (x ^ difference)) >= 0 {
+                                            return .int(i: difference)
+                                        }
+                                    }
+                                    .mul -> {
+                                        if x > -2147483648 && x < 2147483648 && y > -2147483648 && y < 2147483648 {
+                                            return .int(i: x * y)
+                                        }
+                                    }
+                                    _ -> {}
+                                }
+                            }
+                            _ -> {}
+                        }
+                    }
+                    _ -> {}
+                }
+                line = prog.lines[n]
+                binaryOp(self, op, a, b)
+            }
+            .compare(left, ops, rights) -> {
+                var a = eval(left)
+                if signal != .none {
+                    return .none
+                }
+                for i in ops.indices {
+                    let b = eval(rights[i])
+                    if signal != .none {
+                        return .none
+                    }
+                    line = prog.lines[n]
+                    let holds = compareOp(self, ops[i], a, b)
+                    if signal != .none {
+                        return .none
+                    }
+                    if !holds {
+                        return .bool(b: false)
+                    }
+                    a = b
+                }
+                Value.bool(b: true)
+            }
+            .call(callee, args, names) -> evalCall(n, callee, args, names)
+            .attr(object, name) -> {
+                let o = eval(object)
+                if signal != .none {
+                    return .none
+                }
+                line = prog.lines[n]
+                getAttr(self, o, name)
+            }
+            .subscript(object, index) -> {
+                let o = eval(object)
+                if signal != .none {
+                    return .none
+                }
+                match prog.nodes[index] {
+                    .slice(lower, upper, step) -> {
+                        let lo = sliceBound(lower)
+                        let hi = sliceBound(upper)
+                        let st = sliceBound(step)
+                        if signal != .none {
+                            return .none
+                        }
+                        line = prog.lines[n]
+                        return getSlice(self, o, lo, hi, st)
+                    }
+                    _ -> {}
+                }
+                let i = eval(index)
+                if signal != .none {
+                    return .none
+                }
+                line = prog.lines[n]
+                getItem(self, o, i)
+            }
+            .boolOp(isAnd, l, r) -> {
+                let a = eval(l)
+                if signal != .none {
+                    return .none
+                }
+                let yes = truthy(self, a)
+                if signal != .none {
+                    return .none
+                }
+                if yes != isAnd {
+                    return a
+                }
+                eval(r)
+            }
+            .unary(op, operand) -> {
+                let v = eval(operand)
+                if signal != .none {
+                    return .none
+                }
+                line = prog.lines[n]
+                unaryOp(self, op, v)
+            }
+            .listLit(items) -> {
+                let values = evalItems(items)
+                if signal != .none {
+                    return .none
+                }
+                newList(values)
+            }
+            .tupleLit(items) -> {
+                let values = evalItems(items)
+                if signal != .none {
+                    return .none
+                }
+                newTuple(values)
+            }
+            .setLit(items) -> {
+                let values = evalItems(items)
+                if signal != .none {
+                    return .none
+                }
+                line = prog.lines[n]
+                makeSet(self, values)
+            }
+            .dictLit(keys, values) -> {
+                let id = newDict()
+                for i in keys.indices {
+                    line = prog.lines[n]
+                    if keys[i] < 0 {
+                        // **other
+                        let other = eval(values[i])
+                        if signal != .none {
+                            return .none
+                        }
+                        dictUpdate(self, id, other)
+                    } else {
+                        let k = eval(keys[i])
+                        if signal != .none {
+                            return .none
+                        }
+                        let v = eval(values[i])
+                        if signal != .none {
+                            return .none
+                        }
+                        let h = hashKey(self, k)
+                        if signal == .none {
+                            dictSet(dicts[id], k, h, v)
+                        }
+                    }
+                    if signal != .none {
+                        return .none
+                    }
+                }
+                Value.dict(id: id)
+            }
+            .lambda(fnId) -> makeClosure(fnId)
+            .ifExp(test, then, otherwise) -> {
+                let t = eval(test)
+                if signal != .none {
+                    return .none
+                }
+                let yes = truthy(self, t)
+                if signal != .none {
+                    return .none
+                }
+                if yes { eval(then) } else { eval(otherwise) }
+            }
+            .comp(kind, element, value, targets, iters, conds) -> {
+                // A comprehension's variables are its own.
+                let outer = env
+                let inner = newEnv(outer)
+                env = inner
+                var out: [Value] = []
+                var outValues: [Value] = []
+                comprehend(kind, element, value, targets, iters, conds, 0, out, outValues)
+                env = outer
+                releaseEnv(inner)
+                if signal != .none {
+                    return .none
+                }
+                line = prog.lines[n]
+                if kind == 0 {
+                    newList(out)
+                } else if kind == 1 {
+                    makeSet(self, out)
+                } else if kind == 2 {
+                    let id = newDict()
+                    for i in out.indices {
+                        let h = hashKey(self, out[i])
+                        if signal != .none {
+                            return .none
+                        }
+                        dictSet(dicts[id], out[i], h, outValues[i])
+                    }
+                    Value.dict(id: id)
+                } else {
+                    newIterator(out, "generator")
+                }
+            }
+            .joined(parts) -> {
+                var text = ""
+                for p in parts {
+                    let v = eval(p)
+                    if signal != .none {
+                        return .none
+                    }
+                    match v {
+                        .str(s) -> { text += s }
+                        _ -> { text += toStr(self, v) }
+                    }
+                }
+                Value.str(s: text)
+            }
+            .formatted(value, conversion, spec) -> {
+                var v = eval(value)
+                if signal != .none {
+                    return .none
+                }
+                line = prog.lines[n]
+                if conversion == "r" || conversion == "a" {
+                    v = .str(s: toRepr(self, v))
+                } else if conversion == "s" {
+                    v = .str(s: toStr(self, v))
+                }
+                if signal != .none {
+                    return .none
+                }
+                if spec < 0 {
+                    return .str(s: toStr(self, v))
+                }
+                let specValue = eval(spec)
+                if signal != .none {
+                    return .none
+                }
+                Value.str(s: formatValue(self, v, toStr(self, specValue)))
+            }
+            .yieldExpr(value) -> {
+                var v = Value.none
+                if value >= 0 {
+                    v = eval(value)
+                    if signal != .none {
+                        return .none
+                    }
+                }
+                if let sink = yields.last {
+                    lists[sink].append(v)
+                }
+                Value.none
+            }
+            .walrus(target, value) -> {
+                let v = eval(value)
+                if signal != .none {
+                    return .none
+                }
+                setVar(target, v)
+                v
+            }
+            .starred(_) -> {
+                line = prog.lines[n]
+                throw("SyntaxError", "can't use starred expression here")
+            }
+            .slice(_, _, _) -> {
+                line = prog.lines[n]
+                throw("TypeError", "slices can only be used to index")
+            }
+            _ -> {
+                exec(n)
+                Value.none
+            }
+        }
+    }
+
+    // A slice's bound: nil where it's left out.
+    fn sliceBound(_ n: Int) -> Int? {
+        if n < 0 || signal != .none {
+            return nil
+        }
+        let v = eval(n)
+        if signal != .none {
+            return nil
+        }
+        match v {
+            .int(i) -> { return i }
+            .bool(b) -> { return if b { 1 } else { 0 } }
+            .none -> { return nil }
+            _ -> {
+                throw("TypeError", "slice indices must be integers or None")
+                return nil
+            }
+        }
+    }
+
+    // The values of a list of expressions, with `*others` spread out.
+    fn evalItems(_ items: [Int]) -> [Value] {
+        var out: [Value] = []
+        for item in items {
+            match prog.nodes[item] {
+                .starred(inner) -> {
+                    let v = eval(inner)
+                    if signal != .none {
+                        return out
+                    }
+                    line = prog.lines[item]
+                    let spread = iterate(self, v)
+                    if signal != .none {
+                        return out
+                    }
+                    out.appendAll(spread)
+                }
+                _ -> {
+                    let v = eval(item)
+                    if signal != .none {
+                        return out
+                    }
+                    out.append(v)
+                }
+            }
+        }
+        out
+    }
+
+    // The `for` clauses of a comprehension, from clause `at` on: each value
+    // of the last one adds an element to `out` (and a value to
+    // `outValues`, for a dictionary).
+    fn comprehend(_ kind: Int, _ element: Int, _ value: Int, _ targets: [Int], _ iters: [Int], _ conds: [[Int]],
+                  _ at: Int, _ out: bind [Value], _ outValues: bind [Value]) {
+        if at == targets.count {
+            let v = eval(element)
+            if signal != .none {
+                return
+            }
+            out.append(v)
+            if kind == 2 {
+                let second = eval(value)
+                if signal != .none {
+                    return
+                }
+                outValues.append(second)
+            }
+            return
+        }
+        let iterable = eval(iters[at])
+        if signal != .none {
+            return
+        }
+        let items = iterate(self, iterable)
+        if signal != .none {
+            return
+        }
+        for item in items {
+            assignTo(targets[at], item)
+            if signal != .none {
+                return
+            }
+            var keep = true
+            for c in conds[at] {
+                let t = eval(c)
+                if signal != .none {
+                    return
+                }
+                keep = truthy(self, t)
+                if signal != .none {
+                    return
+                }
+                if !keep {
+                    break
+                }
+            }
+            if keep {
+                comprehend(kind, element, value, targets, iters, conds, at + 1, out, outValues)
+                if signal != .none {
+                    return
+                }
+            }
+        }
+    }
+
+    // ---- calls ----
+
+    fn evalArgs(_ argNodes: [Int], _ names: [String], _ args: bind [Value], _ kwNames: bind [String], _ kwValues: bind [Value]) {
+        for i in argNodes.indices {
+            let v = eval(argNodes[i])
+            if signal != .none {
+                return
+            }
+            let name = names[i]
+            if name == "" {
+                args.append(v)
+            } else if name == "*" {
+                let spread = iterate(self, v)
+                if signal != .none {
+                    return
+                }
+                args.appendAll(spread)
+            } else if name == "**" {
+                match v {
+                    .dict(id) -> {
+                        let keys = dictKeys(dicts[id])
+                        let values = dictValues(dicts[id])
+                        for k in keys.indices {
+                            match keys[k] {
+                                .str(s) -> {
+                                    kwNames.append(s)
+                                    kwValues.append(values[k])
+                                }
+                                _ -> {
+                                    throw("TypeError", "keywords must be strings")
+                                    return
+                                }
+                            }
+                        }
+                    }
+                    _ -> {
+                        throw("TypeError", "argument after ** must be a mapping, not {typeName(self, v)}")
+                        return
+                    }
+                }
+            } else {
+                kwNames.append(name)
+                kwValues.append(v)
+            }
+        }
+    }
+
+    fn evalCall(_ n: Int, _ callee: Int, _ argNodes: [Int], _ names: [String]) -> Value {
+        var args: [Value] = []
+        var kwNames: [String] = []
+        var kwValues: [Value] = []
+        // object.method(…): the method is called on the object directly,
+        // without making a bound method first.
+        match prog.nodes[callee] {
+            .attr(object, name) -> {
+                let receiver = eval(object)
+                if signal != .none {
+                    return .none
+                }
+                evalArgs(argNodes, names, args, kwNames, kwValues)
+                if signal != .none {
+                    return .none
+                }
+                line = prog.lines[n]
+                return callMethod(self, receiver, name, args, kwNames, kwValues)
+            }
+            _ -> {}
+        }
+        let f = eval(callee)
+        if signal != .none {
+            return .none
+        }
+        evalArgs(argNodes, names, args, kwNames, kwValues)
+        if signal != .none {
+            return .none
+        }
+        line = prog.lines[n]
+        callValue(f, args, kwNames, kwValues)
+    }
+
+    fn callValue(_ f: Value, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
+        match f {
+            .function(id) -> callClosure(id, args, kwNames, kwValues)
+            .builtin(name) -> callBuiltin(self, name, args, kwNames, kwValues)
+            .bound(id) -> {
+                let b = bounds[id]
+                match b.method {
+                    .builtin(name) -> {
+                        if name == "@exception_init" {
+                            // super().__init__(…) in an exception class.
+                            match b.receiver {
+                                .instance(e) -> { instances[e].fields["args"] = newTuple(args) }
+                                _ -> {}
+                            }
+                            return .none
+                        }
+                        // (A built-in type's method: "@append" for `list.append`.)
+                        if name.hasPrefix("@") {
+                            return callMethod(self, b.receiver, name.substring(from: 1, to: name.count), args, kwNames, kwValues)
+                        }
+                    }
+                    _ -> {}
+                }
+                var all = [b.receiver]
+                all.appendAll(args)
+                callValue(b.method, all, kwNames, kwValues)
+            }
+            .klass(id) -> instantiate(self, id, args, kwNames, kwValues)
+            .wrapper(_, id) -> callValue(cells[id], args, kwNames, kwValues)
+            .instance(id) -> {
+                let method = classAttr(self, instances[id].cls, "__call__")
+                if method == Value.absent {
+                    return throw("TypeError", "'{typeName(self, f)}' object is not callable")
+                }
+                var all = [f]
+                all.appendAll(args)
+                callValue(method, all, kwNames, kwValues)
+            }
+            _ -> throw("TypeError", "'{typeName(self, f)}' object is not callable")
+        }
+    }
+
+    fn makeClosure(_ fnId: Int) -> Value {
+        let def = prog.defs[fnId]
+        var defaults: [Value] = []
+        for d in def.defaults {
+            if d < 0 {
+                defaults.append(.absent)
+            } else {
+                let v = eval(d)
+                if signal != .none {
+                    return .none
+                }
+                defaults.append(v)
+            }
+        }
+        // A function made in a class body doesn't see the class's names.
+        var home = env
+        if envs[home].isClass {
+            home = envs[home].parent
+        }
+        // It may use the variables around it later: they stay.
+        var e = home
+        while e >= 0 && !envs[e].captured {
+            envs[e].captured = true
+            e = envs[e].parent
+        }
+        closures.append(Closure(fnId: fnId, env: home, name: def.name, defaults: defaults, owner: -1))
+        Value.function(id: closures.count - 1)
+    }
+
+    fn callClosure(_ id: Int, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
+        let c = closures[id]
+        let def = prog.defs[c.fnId]
+        if depth >= 600 {
+            return throw("RecursionError", "maximum recursion depth exceeded")
+        }
+        let count = def.params.count
+        if args.count > count && def.varargs == "" {
+            let s = if count == 1 { "" } else { "s" }
+            let were = if args.count == 1 { "was" } else { "were" }
+            return throw("TypeError", "{def.name}() takes {count} positional argument{s} but {args.count} {were} given")
+        }
+        let e = newEnv(c.env)
+        let given = if args.count < count { args.count } else { count }
+        for i in 0..given {
+            envs[e].vars[def.params[i]] = args[i]
+        }
+        if def.varargs != "" {
+            envs[e].vars[def.varargs] = newTuple(if args.count > count { args.slice(from: count, to: args.count) } else { [] })
+        }
+        var extra = -1
+        if def.kwargs != "" {
+            extra = newDict()
+            envs[e].vars[def.kwargs] = .dict(id: extra)
+        }
+        for k in kwNames.indices {
+            let name = kwNames[k]
+            if def.params.contains(name) {
+                if envs[e].vars.contains(key: name) {
+                    releaseEnv(e)
+                    return throw("TypeError", "{def.name}() got multiple values for argument '{name}'")
+                }
+                envs[e].vars[name] = kwValues[k]
+            } else if extra >= 0 {
+                dictSet(dicts[extra], .str(s: name), "s" + name, kwValues[k])
+            } else {
+                releaseEnv(e)
+                return throw("TypeError", "{def.name}() got an unexpected keyword argument '{name}'")
+            }
+        }
+        if given < count {
+            var missing: [String] = []
+            for i in given..count {
+                let p = def.params[i]
+                if !envs[e].vars.contains(key: p) {
+                    if c.defaults[i] == Value.absent {
+                        missing.append("'{p}'")
+                    } else {
+                        envs[e].vars[p] = c.defaults[i]
+                    }
+                }
+            }
+            if !missing.isEmpty {
+                releaseEnv(e)
+                let s = if missing.count == 1 { "" } else { "s" }
+                var names = missing.joined(separator: ", ")
+                if missing.count > 1 {
+                    names = missing.dropLast().joined(separator: ", ") + " and " + (missing.last ?? "")
+                }
+                return throw("TypeError", "{def.name}() missing {missing.count} required positional argument{s}: {names}")
+            }
+        }
+
+        let savedEnv = env
+        let savedName = funcName
+        let savedClass = curClass
+        let savedSelf = curSelf
+        let callLine = line
+        env = e
+        funcName = def.name
+        curClass = c.owner
+        if c.owner >= 0 && !args.isEmpty {
+            curSelf = args[0]
+        }
+        depth += 1
+        var result = Value.none
+        if def.isGenerator {
+            lists.append([])
+            yields.append(lists.count - 1)
+        }
+        if def.isLambda {
+            result = eval(def.body[0])
+        } else {
+            for s in def.body {
+                exec(s)
+                if signal != .none {
+                    break
+                }
+            }
+            if signal == .returning {
+                result = retval
+                retval = .none
+                signal = .none
+            }
+        }
+        if def.isGenerator {
+            // (Everything it yields is worked out at once: see the README.)
+            let sink = yields.removeLast()
+            if signal == .none {
+                result = newIterator(lists[sink], "generator")
+            }
+        }
+        depth -= 1
+        env = savedEnv
+        funcName = savedName
+        curClass = savedClass
+        curSelf = savedSelf
+        if signal == .raising {
+            traceLines.append(callLine)
+            traceNames.append(savedName)
+        }
+        line = callLine
+        releaseEnv(e)
+        result
+    }
+
+    // ---- statements ----
+
+    fn execBlock(_ body: [Int]) {
+        for s in body {
+            exec(s)
+            if signal != .none {
+                return
+            }
+        }
+    }
+
+    // A loop's body, once. Gives 0 to go on with the loop, 1 for `break`,
+    // and 2 when the loop is being left by a `return` or an exception.
+    fn loopBody(_ body: [Int]) -> Int {
+        for s in body {
+            exec(s)
+            if signal != .none {
+                if signal == .continueLoop {
+                    signal = .none
+                    return 0
+                }
+                if signal == .breakLoop {
+                    signal = .none
+                    return 1
+                }
+                return 2
+            }
+        }
+        0
+    }
+
+    fn exec(_ n: Int) {
+        line = prog.lines[n]
+        match prog.nodes[n] {
+            .exprStmt(value) -> {
+                eval(value)
+            }
+            .assign(targets, value) -> {
+                let v = eval(value)
+                if signal != .none {
+                    return
+                }
+                for t in targets {
+                    assignTo(t, v)
+                    if signal != .none {
+                        return
+                    }
+                }
+            }
+            .augAssign(op, target, value) -> augmentedAssign(n, op, target, value)
+            .ifStmt(test, body, orelse) -> {
+                let t = eval(test)
+                if signal != .none {
+                    return
+                }
+                let yes = truthy(self, t)
+                if signal != .none {
+                    return
+                }
+                if yes {
+                    execBlock(body)
+                } else {
+                    execBlock(orelse)
+                }
+            }
+            .whileStmt(test, body, orelse) -> {
+                var broke = false
+                while true {
+                    let t = eval(test)
+                    if signal != .none {
+                        return
+                    }
+                    let yes = truthy(self, t)
+                    if signal != .none {
+                        return
+                    }
+                    if !yes {
+                        break
+                    }
+                    let how = loopBody(body)
+                    if how == 1 {
+                        broke = true
+                        break
+                    }
+                    if how == 2 {
+                        return
+                    }
+                }
+                if !broke {
+                    execBlock(orelse)
+                }
+            }
+            .forStmt(target, iter, body, orelse) -> forLoop(target, iter, body, orelse)
+            .returnStmt(value) -> {
+                var v = Value.none
+                if value >= 0 {
+                    v = eval(value)
+                    if signal != .none {
+                        return
+                    }
+                }
+                retval = v
+                signal = .returning
+            }
+            .passStmt -> {}
+            .breakStmt -> { signal = .breakLoop }
+            .continueStmt -> { signal = .continueLoop }
+            .funcDef(name, fnId, decorators) -> {
+                var f = makeClosure(fnId)
+                if signal != .none {
+                    return
+                }
+                f = decorate(f, decorators)
+                if signal != .none {
+                    return
+                }
+                setVar(name, f)
+            }
+            .classDef(name, bases, body, decorators) -> classDefinition(name, bases, body, decorators)
+            .globalStmt(names) -> { envs[env].globals.appendAll(names) }
+            .nonlocalStmt(names) -> { envs[env].nonlocals.appendAll(names) }
+            .tryStmt(body, handlers, orelse, finalbody) -> tryStatement(body, handlers, orelse, finalbody)
+            .raiseStmt(value, cause) -> {
+                if value < 0 {
+                    if let current = handling.last {
+                        raise(current)
+                    } else {
+                        throw("RuntimeError", "No active exception to reraise")
+                    }
+                    return
+                }
+                var v = eval(value)
+                if signal != .none {
+                    return
+                }
+                if cause >= 0 {
+                    eval(cause)
+                    if signal != .none {
+                        return
+                    }
+                }
+                line = prog.lines[n]
+                match v {
+                    .klass(id) -> {
+                        v = instantiate(self, id, [], [], [])
+                        if signal != .none {
+                            return
+                        }
+                    }
+                    _ -> {}
+                }
+                if !isException(self, v) {
+                    throw("TypeError", "exceptions must derive from BaseException")
+                    return
+                }
+                raise(v)
+            }
+            .assertStmt(test, message) -> {
+                let t = eval(test)
+                if signal != .none {
+                    return
+                }
+                let yes = truthy(self, t)
+                if signal != .none || yes {
+                    return
+                }
+                var text = ""
+                if message >= 0 {
+                    let m = eval(message)
+                    if signal != .none {
+                        return
+                    }
+                    text = toStr(self, m)
+                }
+                line = prog.lines[n]
+                throw("AssertionError", text)
+            }
+            .delStmt(targets) -> {
+                for t in targets {
+                    deleteTarget(t)
+                    if signal != .none {
+                        return
+                    }
+                }
+            }
+            .importStmt(names, aliases) -> {
+                for i in names.indices {
+                    let m = importModule(self, names[i])
+                    if signal != .none {
+                        return
+                    }
+                    setVar(aliases[i], m)
+                }
+            }
+            .fromImport(module, names, aliases) -> {
+                let m = importModule(self, module)
+                if signal != .none {
+                    return
+                }
+                for i in names.indices {
+                    if names[i] == "*" {
+                        importAll(self, m)
+                    } else {
+                        let v = getAttr(self, m, names[i])
+                        if signal != .none {
+                            // (Not an attribute error: a failed import.)
+                            signal = .none
+                            throw("ImportError", "cannot import name '{names[i]}' from '{module}'")
+                            return
+                        }
+                        setVar(aliases[i], v)
+                    }
+                }
+            }
+            .withStmt(items, targets, body) -> withStatement(items, targets, body, 0)
+            _ -> {
+                eval(n)
+            }
+        }
+    }
+
+    fn decorate(_ f: Value, _ decorators: [Int]) -> Value {
+        var result = f
+        // (The one nearest the `def` is applied first.)
+        for d in decorators.reversed() {
+            let decorator = eval(d)
+            if signal != .none {
+                return .none
+            }
+            result = callValue(decorator, [result], [], [])
+            if signal != .none {
+                return .none
+            }
+        }
+        result
+    }
+
+    fn forLoop(_ target: Int, _ iter: Int, _ body: [Int], _ orelse: [Int]) {
+        let iterable = eval(iter)
+        if signal != .none {
+            return
+        }
+        // A plain name as the loop's variable is set directly.
+        var simple = ""
+        match prog.nodes[target] {
+            .name(id) -> { simple = id }
+            _ -> {}
+        }
+        if !envs[env].globals.isEmpty || !envs[env].nonlocals.isEmpty {
+            simple = ""
+        }
+        var broke = false
+        match iterable {
+            .range(start, stop, step) -> {
+                var i = start
+                while (step > 0 && i < stop) || (step < 0 && i > stop) {
+                    if simple != "" {
+                        envs[env].vars[simple] = .int(i: i)
+                    } else {
+                        assignTo(target, .int(i: i))
+                        if signal != .none {
+                            return
+                        }
+                    }
+                    let how = loopBody(body)
+                    if how == 1 {
+                        broke = true
+                        break
+                    }
+                    if how == 2 {
+                        return
+                    }
+                    i += step
+                }
+            }
+            .list(id) -> {
+                // (The list as it is each time round: it may change in the loop.)
+                var i = 0
+                while i < lists[id].count {
+                    let item = lists[id][i]
+                    if simple != "" {
+                        envs[env].vars[simple] = item
+                    } else {
+                        assignTo(target, item)
+                        if signal != .none {
+                            return
+                        }
+                    }
+                    let how = loopBody(body)
+                    if how == 1 {
+                        broke = true
+                        break
+                    }
+                    if how == 2 {
+                        return
+                    }
+                    i += 1
+                }
+            }
+            _ -> {
+                let items = iterate(self, iterable)
+                if signal != .none {
+                    return
+                }
+                for item in items {
+                    if simple != "" {
+                        envs[env].vars[simple] = item
+                    } else {
+                        assignTo(target, item)
+                        if signal != .none {
+                            return
+                        }
+                    }
+                    let how = loopBody(body)
+                    if how == 1 {
+                        broke = true
+                        break
+                    }
+                    if how == 2 {
+                        return
+                    }
+                }
+            }
+        }
+        if !broke {
+            execBlock(orelse)
+        }
+    }
+
+    // target = value, for every kind of target.
+    fn assignTo(_ target: Int, _ v: Value) {
+        match prog.nodes[target] {
+            .name(id) -> setVar(id, v)
+            .attr(object, name) -> {
+                let o = eval(object)
+                if signal != .none {
+                    return
+                }
+                line = prog.lines[target]
+                setAttr(self, o, name, v)
+            }
+            .subscript(object, index) -> {
+                let o = eval(object)
+                if signal != .none {
+                    return
+                }
+                match prog.nodes[index] {
+                    .slice(lower, upper, step) -> {
+                        let lo = sliceBound(lower)
+                        let hi = sliceBound(upper)
+                        let st = sliceBound(step)
+                        if signal != .none {
+                            return
+                        }
+                        line = prog.lines[target]
+                        setSlice(self, o, lo, hi, st, v)
+                        return
+                    }
+                    _ -> {}
+                }
+                let i = eval(index)
+                if signal != .none {
+                    return
+                }
+                line = prog.lines[target]
+                setItem(self, o, i, v)
+            }
+            .tupleLit(items) -> unpack(items, v, target)
+            .listLit(items) -> unpack(items, v, target)
+            .starred(inner) -> assignTo(inner, v)
+            _ -> {
+                throw("SyntaxError", "cannot assign to expression")
+            }
+        }
+    }
+
+    // a, b = value (and a, *rest = value).
+    fn unpack(_ targets: [Int], _ v: Value, _ at: Int) {
+        line = prog.lines[at]
+        let items = iterate(self, v)
+        if signal != .none {
+            signal = .none
+            throw("TypeError", "cannot unpack non-iterable {typeName(self, v)} object")
+            return
+        }
+        var star = -1
+        for i in targets.indices {
+            match prog.nodes[targets[i]] {
+                .starred(_) -> { star = i }
+                _ -> {}
+            }
+        }
+        if star < 0 {
+            if items.count > targets.count {
+                throw("ValueError", "too many values to unpack (expected {targets.count})")
+                return
+            }
+            if items.count < targets.count {
+                throw("ValueError", "not enough values to unpack (expected {targets.count}, got {items.count})")
+                return
+            }
+            for i in targets.indices {
+                assignTo(targets[i], items[i])
+                if signal != .none {
+                    return
+                }
+            }
+            return
+        }
+        let after = targets.count - star - 1
+        if items.count < targets.count - 1 {
+            throw("ValueError", "not enough values to unpack (expected at least {targets.count - 1}, got {items.count})")
+            return
+        }
+        for i in 0..star {
+            assignTo(targets[i], items[i])
+            if signal != .none {
+                return
+            }
+        }
+        assignTo(targets[star], newList(items.slice(from: star, to: items.count - after)))
+        for i in 0..after {
+            assignTo(targets[star + 1 + i], items[items.count - after + i])
+            if signal != .none {
+                return
+            }
+        }
+    }
+
+    // target op= value.
+    fn augmentedAssign(_ n: Int, _ op: BinOp, _ target: Int, _ value: Int) {
+        match prog.nodes[target] {
+            .name(id) -> {
+                let current = lookup(id)
+                if signal != .none {
+                    return
+                }
+                let v = eval(value)
+                if signal != .none {
+                    return
+                }
+                line = prog.lines[n]
+                let result = inPlaceOp(self, op, current, v)
+                if signal != .none {
+                    return
+                }
+                setVar(id, result)
+            }
+            .attr(object, name) -> {
+                let o = eval(object)
+                if signal != .none {
+                    return
+                }
+                let current = getAttr(self, o, name)
+                if signal != .none {
+                    return
+                }
+                let v = eval(value)
+                if signal != .none {
+                    return
+                }
+                line = prog.lines[n]
+                let result = inPlaceOp(self, op, current, v)
+                if signal != .none {
+                    return
+                }
+                setAttr(self, o, name, result)
+            }
+            .subscript(object, index) -> {
+                let o = eval(object)
+                if signal != .none {
+                    return
+                }
+                let i = eval(index)
+                if signal != .none {
+                    return
+                }
+                line = prog.lines[n]
+                let current = getItem(self, o, i)
+                if signal != .none {
+                    return
+                }
+                let v = eval(value)
+                if signal != .none {
+                    return
+                }
+                line = prog.lines[n]
+                let result = inPlaceOp(self, op, current, v)
+                if signal != .none {
+                    return
+                }
+                setItem(self, o, i, result)
+            }
+            _ -> {
+                throw("SyntaxError", "illegal expression for augmented assignment")
+            }
+        }
+    }
+
+    fn deleteTarget(_ target: Int) {
+        match prog.nodes[target] {
+            .name(id) -> {
+                if envs[env].vars.removeValue(forKey: id) == nil {
+                    line = prog.lines[target]
+                    throw("NameError", "name '{id}' is not defined")
+                }
+            }
+            .attr(object, name) -> {
+                let o = eval(object)
+                if signal != .none {
+                    return
+                }
+                line = prog.lines[target]
+                deleteAttr(self, o, name)
+            }
+            .subscript(object, index) -> {
+                let o = eval(object)
+                if signal != .none {
+                    return
+                }
+                match prog.nodes[index] {
+                    .slice(lower, upper, step) -> {
+                        let lo = sliceBound(lower)
+                        let hi = sliceBound(upper)
+                        let st = sliceBound(step)
+                        if signal != .none {
+                            return
+                        }
+                        line = prog.lines[target]
+                        setSlice(self, o, lo, hi, st, newList([]))
+                        return
+                    }
+                    _ -> {}
+                }
+                let i = eval(index)
+                if signal != .none {
+                    return
+                }
+                line = prog.lines[target]
+                deleteItem(self, o, i)
+            }
+            .tupleLit(items) -> {
+                for t in items {
+                    deleteTarget(t)
+                    if signal != .none {
+                        return
+                    }
+                }
+            }
+            _ -> {
+                throw("SyntaxError", "cannot delete expression")
+            }
+        }
+    }
+
+    fn classDefinition(_ name: String, _ baseNodes: [Int], _ body: [Int], _ decorators: [Int]) {
+        var bases: [Int] = []
+        for b in baseNodes {
+            let v = eval(b)
+            if signal != .none {
+                return
+            }
+            match v {
+                .klass(id) -> { bases.append(id) }
+                _ -> {
+                    throw("TypeError", "a class's bases must be classes")
+                    return
+                }
+            }
+        }
+        if bases.isEmpty {
+            bases = [classIds["object"] ?? 0]
+        }
+        // The body runs with variables of its own, which become the
+        // class's attributes.
+        let outer = env
+        let inner = newEnv(outer)
+        envs[inner].isClass = true
+        env = inner
+        let savedName = funcName
+        funcName = name
+        execBlock(body)
+        funcName = savedName
+        env = outer
+        if signal != .none {
+            releaseEnv(inner)
+            return
+        }
+        let id = makeClass(self, name, bases, envs[inner].vars)
+        releaseEnv(inner)
+        var cls = Value.klass(id: id)
+        cls = decorate(cls, decorators)
+        if signal != .none {
+            return
+        }
+        setVar(name, cls)
+    }
+
+    fn tryStatement(_ body: [Int], _ handlers: [Int], _ orelse: [Int], _ finalbody: [Int]) {
+        execBlock(body)
+        if signal == .raising {
+            let raised = exc
+            for h in handlers {
+                match prog.nodes[h] {
+                    .handler(type, name, handlerBody) -> {
+                        var fits = true
+                        if type >= 0 {
+                            // (The exception is put aside while its type is worked out.)
+                            let lines = traceLines
+                            let names = traceNames
+                            signal = .none
+                            let wanted = eval(type)
+                            if signal == .none {
+                                fits = exceptionMatches(self, raised, wanted)
+                            }
+                            if signal != .none {
+                                // (Working it out failed: that's the exception now.)
+                                break
+                            }
+                            signal = .raising
+                            exc = raised
+                            traceLines = lines
+                            traceNames = names
+                        }
+                        if fits {
+                            signal = .none
+                            exc = .none
+                            if name != "" {
+                                setVar(name, raised)
+                            }
+                            handling.append(raised)
+                            execBlock(handlerBody)
+                            handling.removeLast()
+                            break
+                        }
+                    }
+                    _ -> {}
+                }
+            }
+        } else if signal == .none {
+            execBlock(orelse)
+        }
+        if finalbody.isEmpty {
+            return
+        }
+        // `finally` runs whatever is on its way out, which then goes on,
+        // unless the `finally` block has something of its own.
+        let pending = signal
+        let pendingValue = retval
+        let pendingExc = exc
+        let lines = traceLines
+        let names = traceNames
+        signal = .none
+        execBlock(finalbody)
+        if signal == .none {
+            signal = pending
+            retval = pendingValue
+            exc = pendingExc
+            traceLines = lines
+            traceNames = names
+        }
+    }
+
+    // with a as x, b as y: body  (from item `at` on).
+    fn withStatement(_ items: [Int], _ targets: [Int], _ body: [Int], _ at: Int) {
+        if at == items.count {
+            execBlock(body)
+            return
+        }
+        let manager = eval(items[at])
+        if signal != .none {
+            return
+        }
+        line = prog.lines[items[at]]
+        let entered = enterContext(self, manager)
+        if signal != .none {
+            return
+        }
+        if targets[at] >= 0 {
+            assignTo(targets[at], entered)
+        }
+        if signal == .none {
+            withStatement(items, targets, body, at + 1)
+        }
+        // Leaving, whatever is on its way out.
+        let pending = signal
+        let pendingValue = retval
+        let pendingExc = exc
+        let lines = traceLines
+        let names = traceNames
+        signal = .none
+        let swallow = exitContext(self, manager, if pending == .raising { pendingExc } else { Value.none })
+        if signal != .none {
+            return
+        }
+        if pending == .raising && swallow {
+            return
+        }
+        signal = pending
+        retval = pendingValue
+        exc = pendingExc
+        traceLines = lines
+        traceNames = names
+    }
+}

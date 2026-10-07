@@ -1,0 +1,100 @@
+// The syntax tree. Nodes are kept in one list (`Program.nodes`) and name
+// each other by index, so the tree is cheap to walk and a node is never
+// copied with its children. An absent child is -1.
+
+enum BinOp { add, sub, mul, div, floorDiv, mod, pow, lshift, rshift, bitAnd, bitOr, bitXor }
+
+enum UnOp { neg, pos, not, invert }
+
+enum CmpOp { eq, ne, lt, le, gt, ge, isOp, isNot, inOp, notIn }
+
+enum Node {
+    // ---- expressions ----
+    noneLit
+    trueLit
+    falseLit
+    intLit(value: Int)
+    floatLit(value: Float)
+    strLit(value: String)
+    name(id: String)
+    binary(op: BinOp, left: Int, right: Int)
+    unary(op: UnOp, operand: Int)
+    boolOp(isAnd: Bool, left: Int, right: Int)
+    // a < b <= c: `left`, then an operator and a right side for each step.
+    compare(left: Int, ops: [CmpOp], rights: [Int])
+    // `names` goes with `args`: "" for a plain argument, a name for
+    // `name=value`, "*" for `*args` and "**" for `**kwargs`.
+    call(callee: Int, args: [Int], names: [String])
+    attr(object: Int, name: String)
+    subscript(object: Int, index: Int)
+    slice(lower: Int, upper: Int, step: Int)
+    listLit(items: [Int])
+    tupleLit(items: [Int])
+    // A key of -1 is `**other`, with the other dictionary as its value.
+    dictLit(keys: [Int], values: [Int])
+    setLit(items: [Int])
+    lambda(fnId: Int)
+    ifExp(test: Int, then: Int, otherwise: Int)
+    // [element for target in iter if cond …]; `kind` is 0 for a list, 1 for
+    // a set, 2 for a dictionary (`element: value`) and 3 for a generator.
+    comp(kind: Int, element: Int, value: Int, targets: [Int], iters: [Int], conds: [[Int]])
+    // An f-string: its parts, joined.
+    joined(parts: [Int])
+    // {value!r:spec} in an f-string; `spec` is a node (or -1).
+    formatted(value: Int, conversion: String, spec: Int)
+    starred(value: Int)
+    yieldExpr(value: Int)
+    walrus(target: String, value: Int)
+
+    // ---- statements ----
+    exprStmt(value: Int)
+    assign(targets: [Int], value: Int)
+    augAssign(op: BinOp, target: Int, value: Int)
+    ifStmt(test: Int, body: [Int], orelse: [Int])
+    whileStmt(test: Int, body: [Int], orelse: [Int])
+    forStmt(target: Int, iter: Int, body: [Int], orelse: [Int])
+    funcDef(name: String, fnId: Int, decorators: [Int])
+    classDef(name: String, bases: [Int], body: [Int], decorators: [Int])
+    returnStmt(value: Int)
+    breakStmt
+    continueStmt
+    passStmt
+    globalStmt(names: [String])
+    nonlocalStmt(names: [String])
+    tryStmt(body: [Int], handlers: [Int], orelse: [Int], finalbody: [Int])
+    handler(type: Int, name: String, body: [Int])
+    raiseStmt(value: Int, cause: Int)
+    assertStmt(test: Int, message: Int)
+    delStmt(targets: [Int])
+    importStmt(names: [String], aliases: [String])
+    fromImport(module: String, names: [String], aliases: [String])
+    withStmt(items: [Int], targets: [Int], body: [Int])
+}
+
+// A `def` or a `lambda`: its parameters and body.
+struct FuncDef {
+    name: String = ""
+    params: [String] = []
+    // For each parameter, the node of its default value, or -1.
+    defaults: [Int] = []
+    // The names of `*args` and `**kwargs`, if it has them.
+    varargs: String = ""
+    kwargs: String = ""
+    body: [Int] = []
+    // A lambda's body is one expression, whose value it returns.
+    isLambda: Bool = false
+    // It has a `yield`: calling it gives what it yields.
+    isGenerator: Bool = false
+    line: Int = 0
+}
+
+struct Program {
+    nodes: [Node] = []
+    // The line each node is on.
+    lines: [Int] = []
+    defs: [FuncDef] = []
+    // The module's statements.
+    body: [Int] = []
+    error: String = ""
+    errorLine: Int = 0
+}

@@ -1,0 +1,1434 @@
+// The parser: tokens to the syntax tree (see ast.tsl). It's a recursive
+// descent parser: a method for each level of Python's grammar. After a
+// syntax error, `error` is set and what's parsed doesn't matter any more;
+// every loop stops when it is.
+
+struct Parser {
+    tokens: [Token] = []
+    pos: Int = 0
+    nodes: [Node] = []
+    lines: [Int] = []
+    defs: [FuncDef] = []
+    error: String = ""
+    errorLine: Int = 0
+    // For each `def` being parsed, whether a `yield` was seen in it.
+    yields: [Bool] = []
+
+    // ---- tokens ----
+
+    fn kind() -> TokKind {
+        tokens[pos].kind
+    }
+
+    fn text() -> String {
+        tokens[pos].text
+    }
+
+    fn line() -> Int {
+        tokens[pos].line
+    }
+
+    fn advance() {
+        if pos < tokens.count - 1 {
+            pos += 1
+        }
+    }
+
+    fn isOp(_ s: String) -> Bool {
+        tokens[pos].kind == .op && tokens[pos].text == s
+    }
+
+    fn isKw(_ s: String) -> Bool {
+        tokens[pos].kind == .keyword && tokens[pos].text == s
+    }
+
+    fn nextIsOp(_ s: String) -> Bool {
+        pos + 1 < tokens.count && tokens[pos + 1].kind == .op && tokens[pos + 1].text == s
+    }
+
+    fn acceptOp(_ s: String) -> Bool {
+        if isOp(s) {
+            advance()
+            return true
+        }
+        false
+    }
+
+    fn acceptKw(_ s: String) -> Bool {
+        if isKw(s) {
+            advance()
+            return true
+        }
+        false
+    }
+
+    fn fail(_ message: String) {
+        if error == "" {
+            error = message
+            errorLine = line()
+        }
+    }
+
+    fn expectOp(_ s: String) {
+        if !acceptOp(s) {
+            fail(if kind() == .newline || kind() == .eof { "expected '{s}'" } else { "invalid syntax" })
+        }
+    }
+
+    fn expectKw(_ s: String) {
+        if !acceptKw(s) {
+            fail("expected '{s}'")
+        }
+    }
+
+    fn expectName() -> String {
+        if kind() == .name {
+            let name = text()
+            advance()
+            return name
+        }
+        fail("invalid syntax")
+        ""
+    }
+
+    fn add(_ node: Node, _ at: Int) -> Int {
+        nodes.append(node)
+        lines.append(at)
+        nodes.count - 1
+    }
+
+    // ---- the module ----
+
+    fn parseModule() -> [Int] {
+        var body: [Int] = []
+        while kind() != .eof && error == "" {
+            if kind() == .newline {
+                advance()
+                continue
+            }
+            if kind() == .indent {
+                fail("unexpected indent")
+                break
+            }
+            statement(body)
+        }
+        body
+    }
+
+    // ---- statements ----
+
+    // One statement (or several on a line, with `;`), added to `out`.
+    fn statement(_ out: bind [Int]) {
+        if kind() == .keyword {
+            match text() {
+                "if" -> {
+                    out.append(ifStatement())
+                    return
+                }
+                "while" -> {
+                    out.append(whileStatement())
+                    return
+                }
+                "for" -> {
+                    out.append(forStatement())
+                    return
+                }
+                "def" -> {
+                    out.append(defStatement([]))
+                    return
+                }
+                "class" -> {
+                    out.append(classStatement([]))
+                    return
+                }
+                "try" -> {
+                    out.append(tryStatement())
+                    return
+                }
+                "with" -> {
+                    out.append(withStatement())
+                    return
+                }
+                _ -> {}
+            }
+        }
+        if isOp("@") {
+            out.append(decorated())
+            return
+        }
+        simpleLine(out)
+    }
+
+    // Simple statements up to the end of the line.
+    fn simpleLine(_ out: bind [Int]) {
+        while error == "" {
+            out.append(simpleStatement())
+            if acceptOp(";") {
+                if kind() == .newline || kind() == .eof {
+                    break
+                }
+                continue
+            }
+            break
+        }
+        if kind() == .newline {
+            advance()
+        } else if kind() != .eof && error == "" {
+            fail("invalid syntax")
+        }
+    }
+
+    // The statements after a `:`: on the same line, or an indented block.
+    fn block() -> [Int] {
+        var body: [Int] = []
+        expectOp(":")
+        if kind() != .newline {
+            simpleLine(body)
+            return body
+        }
+        advance()
+        if kind() != .indent {
+            fail("expected an indented block")
+            return body
+        }
+        advance()
+        while kind() != .dedent && kind() != .eof && error == "" {
+            if kind() == .newline {
+                advance()
+                continue
+            }
+            statement(body)
+        }
+        if kind() == .dedent {
+            advance()
+        }
+        body
+    }
+
+    fn ifStatement() -> Int {
+        let at = line()
+        advance()
+        let test = namedExpression()
+        let body = block()
+        var orelse: [Int] = []
+        if isKw("elif") {
+            orelse.append(ifStatement())
+        } else if acceptKw("else") {
+            orelse = block()
+        }
+        add(.ifStmt(test: test, body: body, orelse: orelse), at)
+    }
+
+    fn whileStatement() -> Int {
+        let at = line()
+        advance()
+        let test = namedExpression()
+        let body = block()
+        var orelse: [Int] = []
+        if acceptKw("else") {
+            orelse = block()
+        }
+        add(.whileStmt(test: test, body: body, orelse: orelse), at)
+    }
+
+    fn forStatement() -> Int {
+        let at = line()
+        advance()
+        let target = targetList()
+        expectKw("in")
+        let iter = expressionList()
+        let body = block()
+        var orelse: [Int] = []
+        if acceptKw("else") {
+            orelse = block()
+        }
+        add(.forStmt(target: target, iter: iter, body: body, orelse: orelse), at)
+    }
+
+    // The targets of `for` (and of a comprehension's `for`): they stop at `in`.
+    fn targetList() -> Int {
+        let at = line()
+        let first = target()
+        if !isOp(",") {
+            return first
+        }
+        var items = [first]
+        while acceptOp(",") && error == "" {
+            if isKw("in") {
+                break
+            }
+            items.append(target())
+        }
+        add(.tupleLit(items: items), at)
+    }
+
+    fn target() -> Int {
+        let at = line()
+        if acceptOp("*") {
+            return add(.starred(value: bitOr()), at)
+        }
+        bitOr()
+    }
+
+    fn parameters(_ closer: String) -> FuncDef {
+        var def = FuncDef(line: line())
+        while !isOp(closer) && error == "" {
+            if acceptOp("**") {
+                def.kwargs = expectName()
+                skipAnnotation(closer)
+            } else if acceptOp("*") {
+                // (A bare `*` only says that what follows is given by name.)
+                if kind() == .name {
+                    def.varargs = expectName()
+                    skipAnnotation(closer)
+                }
+            } else if acceptOp("/") {
+                // (What came before is given by position: nothing to do.)
+            } else {
+                def.params.append(expectName())
+                skipAnnotation(closer)
+                if acceptOp("=") {
+                    def.defaults.append(expression())
+                } else {
+                    def.defaults.append(-1)
+                }
+            }
+            if !acceptOp(",") {
+                break
+            }
+        }
+        def
+    }
+
+    // `: annotation` after a parameter (not in a lambda, whose `:` ends
+    // the parameters): read and left out.
+    fn skipAnnotation(_ closer: String) {
+        if closer == ")" && acceptOp(":") {
+            expression()
+        }
+    }
+
+    fn defStatement(_ decorators: [Int]) -> Int {
+        let at = line()
+        advance()
+        let name = expectName()
+        expectOp("(")
+        var def = parameters(")")
+        expectOp(")")
+        if acceptOp("->") {
+            expression()
+        }
+        def.name = name
+        def.line = at
+        yields.append(false)
+        def.body = block()
+        def.isGenerator = yields.removeLast()
+        defs.append(def)
+        add(.funcDef(name: name, fnId: defs.count - 1, decorators: decorators), at)
+    }
+
+    fn classStatement(_ decorators: [Int]) -> Int {
+        let at = line()
+        advance()
+        let name = expectName()
+        var bases: [Int] = []
+        if acceptOp("(") {
+            while !isOp(")") && error == "" {
+                // (`metaclass=…` and the like are read and left out.)
+                if kind() == .name && nextIsOp("=") {
+                    advance()
+                    advance()
+                    expression()
+                } else {
+                    bases.append(expression())
+                }
+                if !acceptOp(",") {
+                    break
+                }
+            }
+            expectOp(")")
+        }
+        let body = block()
+        add(.classDef(name: name, bases: bases, body: body, decorators: decorators), at)
+    }
+
+    fn decorated() -> Int {
+        var decorators: [Int] = []
+        while acceptOp("@") && error == "" {
+            decorators.append(namedExpression())
+            if kind() == .newline {
+                advance()
+            } else {
+                fail("invalid syntax")
+            }
+        }
+        if isKw("def") {
+            return defStatement(decorators)
+        }
+        if isKw("class") {
+            return classStatement(decorators)
+        }
+        fail("invalid syntax")
+        0
+    }
+
+    fn tryStatement() -> Int {
+        let at = line()
+        advance()
+        let body = block()
+        var handlers: [Int] = []
+        var orelse: [Int] = []
+        var finalbody: [Int] = []
+        while isKw("except") && error == "" {
+            let handlerLine = line()
+            advance()
+            var type = -1
+            var name = ""
+            if !isOp(":") {
+                type = expression()
+                if acceptKw("as") {
+                    name = expectName()
+                }
+            }
+            let handlerBody = block()
+            handlers.append(add(.handler(type: type, name: name, body: handlerBody), handlerLine))
+        }
+        if acceptKw("else") {
+            orelse = block()
+        }
+        var hasFinally = false
+        if acceptKw("finally") {
+            hasFinally = true
+            finalbody = block()
+        }
+        if handlers.isEmpty && !hasFinally {
+            fail("expected 'except' or 'finally' block")
+        }
+        add(.tryStmt(body: body, handlers: handlers, orelse: orelse, finalbody: finalbody), at)
+    }
+
+    fn withStatement() -> Int {
+        let at = line()
+        advance()
+        var items: [Int] = []
+        var targets: [Int] = []
+        let parens = isOp("(")
+        if parens {
+            advance()
+        }
+        while error == "" {
+            items.append(expression())
+            if acceptKw("as") {
+                targets.append(target())
+            } else {
+                targets.append(-1)
+            }
+            if !acceptOp(",") {
+                break
+            }
+            if parens && isOp(")") {
+                break
+            }
+        }
+        if parens {
+            expectOp(")")
+        }
+        let body = block()
+        add(.withStmt(items: items, targets: targets, body: body), at)
+    }
+
+    fn augmentedOp() -> BinOp? {
+        if kind() != .op {
+            return nil
+        }
+        match text() {
+            "+=" -> { return BinOp.add }
+            "-=" -> { return BinOp.sub }
+            "*=" -> { return BinOp.mul }
+            "/=" -> { return BinOp.div }
+            "//=" -> { return BinOp.floorDiv }
+            "%=" -> { return BinOp.mod }
+            "**=" -> { return BinOp.pow }
+            "<<=" -> { return BinOp.lshift }
+            ">>=" -> { return BinOp.rshift }
+            "&=" -> { return BinOp.bitAnd }
+            "|=" -> { return BinOp.bitOr }
+            "^=" -> { return BinOp.bitXor }
+            _ -> { return nil }
+        }
+    }
+
+    fn nameList() -> [String] {
+        var names = [expectName()]
+        while acceptOp(",") && error == "" {
+            names.append(expectName())
+        }
+        names
+    }
+
+    fn dottedName() -> String {
+        var name = expectName()
+        while acceptOp(".") && error == "" {
+            name += "." + expectName()
+        }
+        name
+    }
+
+    fn simpleStatement() -> Int {
+        let at = line()
+        if kind() == .keyword {
+            match text() {
+                "pass" -> {
+                    advance()
+                    return add(.passStmt, at)
+                }
+                "break" -> {
+                    advance()
+                    return add(.breakStmt, at)
+                }
+                "continue" -> {
+                    advance()
+                    return add(.continueStmt, at)
+                }
+                "return" -> {
+                    advance()
+                    var value = -1
+                    if kind() != .newline && kind() != .eof && !isOp(";") {
+                        value = expressionList()
+                    }
+                    return add(.returnStmt(value: value), at)
+                }
+                "raise" -> {
+                    advance()
+                    var value = -1
+                    var cause = -1
+                    if kind() != .newline && kind() != .eof && !isOp(";") {
+                        value = expression()
+                        if acceptKw("from") {
+                            cause = expression()
+                        }
+                    }
+                    return add(.raiseStmt(value: value, cause: cause), at)
+                }
+                "global" -> {
+                    advance()
+                    return add(.globalStmt(names: nameList()), at)
+                }
+                "nonlocal" -> {
+                    advance()
+                    return add(.nonlocalStmt(names: nameList()), at)
+                }
+                "del" -> {
+                    advance()
+                    var targets = [bitOr()]
+                    while acceptOp(",") && error == "" {
+                        if kind() == .newline {
+                            break
+                        }
+                        targets.append(bitOr())
+                    }
+                    return add(.delStmt(targets: targets), at)
+                }
+                "assert" -> {
+                    advance()
+                    let test = expression()
+                    var message = -1
+                    if acceptOp(",") {
+                        message = expression()
+                    }
+                    return add(.assertStmt(test: test, message: message), at)
+                }
+                "import" -> {
+                    advance()
+                    var names: [String] = []
+                    var aliases: [String] = []
+                    while error == "" {
+                        let name = dottedName()
+                        names.append(name)
+                        aliases.append(if acceptKw("as") { expectName() } else { name })
+                        if !acceptOp(",") {
+                            break
+                        }
+                    }
+                    return add(.importStmt(names: names, aliases: aliases), at)
+                }
+                "from" -> {
+                    advance()
+                    let module = dottedName()
+                    expectKw("import")
+                    var names: [String] = []
+                    var aliases: [String] = []
+                    if acceptOp("*") {
+                        names.append("*")
+                        aliases.append("*")
+                    } else {
+                        let parens = acceptOp("(")
+                        while error == "" {
+                            let name = expectName()
+                            names.append(name)
+                            aliases.append(if acceptKw("as") { expectName() } else { name })
+                            if !acceptOp(",") {
+                                break
+                            }
+                            if parens && isOp(")") {
+                                break
+                            }
+                        }
+                        if parens {
+                            expectOp(")")
+                        }
+                    }
+                    return add(.fromImport(module: module, names: names, aliases: aliases), at)
+                }
+                _ -> {}
+            }
+        }
+        // An expression, an assignment, or `x op= value`.
+        let first = starExpressionList()
+        if let op = augmentedOp() {
+            advance()
+            checkTarget(first, augmented: true)
+            let value = if isKw("yield") { yieldExpression() } else { expressionList() }
+            return add(.augAssign(op: op, target: first, value: value), at)
+        }
+        if isOp(":") {
+            // An annotation: `x: int = 5` is `x = 5`, and `x: int` nothing.
+            advance()
+            expression()
+            if acceptOp("=") {
+                checkTarget(first, augmented: true)
+                let value = expressionList()
+                return add(.assign(targets: [first], value: value), at)
+            }
+            return add(.passStmt, at)
+        }
+        if isOp("=") {
+            var targets = [first]
+            var value = first
+            while acceptOp("=") && error == "" {
+                value = if isKw("yield") { yieldExpression() } else { starExpressionList() }
+                if isOp("=") {
+                    targets.append(value)
+                }
+            }
+            for t in targets {
+                checkTarget(t, augmented: false)
+            }
+            return add(.assign(targets: targets, value: value), at)
+        }
+        add(.exprStmt(value: first), at)
+    }
+
+    // Whether a node can be assigned to.
+    fn checkTarget(_ n: Int, augmented: Bool) {
+        match nodes[n] {
+            .name(_), .attr(_, _), .subscript(_, _) -> {}
+            .tupleLit(items) -> checkTargets(items, n, augmented)
+            .listLit(items) -> checkTargets(items, n, augmented)
+            .starred(value) -> checkTarget(value, augmented: augmented)
+            .call(_, _, _) -> failAt("cannot assign to function call", lines[n])
+            .intLit(_), .floatLit(_), .strLit(_), .noneLit, .trueLit, .falseLit -> failAt("cannot assign to literal", lines[n])
+            _ -> failAt("cannot assign to expression", lines[n])
+        }
+    }
+
+    fn checkTargets(_ items: [Int], _ n: Int, _ augmented: Bool) {
+        if augmented {
+            failAt("'tuple' is an illegal expression for augmented assignment", lines[n])
+        }
+        for i in items {
+            checkTarget(i, augmented: false)
+        }
+    }
+
+    fn failAt(_ message: String, _ at: Int) {
+        if error == "" {
+            error = message
+            errorLine = at
+        }
+    }
+
+    // ---- expressions ----
+
+    // a, b, c (a tuple when there's a comma).
+    fn expressionList() -> Int {
+        starExpressionList()
+    }
+
+    fn starExpressionList() -> Int {
+        let at = line()
+        let first = starOrExpression()
+        if !isOp(",") {
+            return first
+        }
+        var items = [first]
+        while acceptOp(",") && error == "" {
+            if endsExpressionList() {
+                break
+            }
+            items.append(starOrExpression())
+        }
+        add(.tupleLit(items: items), at)
+    }
+
+    fn endsExpressionList() -> Bool {
+        if kind() == .newline || kind() == .eof {
+            return true
+        }
+        if kind() == .op {
+            let t = text()
+            return t == "=" || t == ")" || t == "]" || t == "\}" || t == ":" || t == ";"
+        }
+        kind() == .keyword && text() == "in"
+    }
+
+    fn starOrExpression() -> Int {
+        let at = line()
+        if acceptOp("*") {
+            return add(.starred(value: bitOr()), at)
+        }
+        namedExpression()
+    }
+
+    // name := value, or an expression.
+    fn namedExpression() -> Int {
+        if kind() == .name && nextIsOp(":=") {
+            let at = line()
+            let name = text()
+            advance()
+            advance()
+            return add(.walrus(target: name, value: expression()), at)
+        }
+        expression()
+    }
+
+    fn expression() -> Int {
+        let at = line()
+        if isKw("lambda") {
+            return lambdaExpression()
+        }
+        if isKw("yield") {
+            return yieldExpression()
+        }
+        let value = orTest()
+        if acceptKw("if") {
+            let test = orTest()
+            expectKw("else")
+            let otherwise = expression()
+            return add(.ifExp(test: test, then: value, otherwise: otherwise), at)
+        }
+        value
+    }
+
+    fn yieldExpression() -> Int {
+        let at = line()
+        advance()
+        if yields.isEmpty {
+            fail("'yield' outside function")
+        } else {
+            yields[yields.count - 1] = true
+        }
+        acceptKw("from")
+        var value = -1
+        if kind() != .newline && kind() != .eof && !isOp(")") && !isOp(";") {
+            value = expressionList()
+        }
+        add(.yieldExpr(value: value), at)
+    }
+
+    fn lambdaExpression() -> Int {
+        let at = line()
+        advance()
+        var def = parameters(":")
+        expectOp(":")
+        def.name = "<lambda>"
+        def.isLambda = true
+        def.line = at
+        yields.append(false)
+        def.body = [expression()]
+        yields.removeLast()
+        defs.append(def)
+        add(.lambda(fnId: defs.count - 1), at)
+    }
+
+    fn orTest() -> Int {
+        var left = andTest()
+        while isKw("or") && error == "" {
+            let at = line()
+            advance()
+            let right = andTest()
+            left = add(.boolOp(isAnd: false, left: left, right: right), at)
+        }
+        left
+    }
+
+    fn andTest() -> Int {
+        var left = notTest()
+        while isKw("and") && error == "" {
+            let at = line()
+            advance()
+            let right = notTest()
+            left = add(.boolOp(isAnd: true, left: left, right: right), at)
+        }
+        left
+    }
+
+    fn notTest() -> Int {
+        if isKw("not") {
+            let at = line()
+            advance()
+            return add(.unary(op: .not, operand: notTest()), at)
+        }
+        comparison()
+    }
+
+    fn comparisonOp() -> CmpOp? {
+        if kind() == .op {
+            match text() {
+                "==" -> { return CmpOp.eq }
+                "!=" -> { return CmpOp.ne }
+                "<" -> { return CmpOp.lt }
+                "<=" -> { return CmpOp.le }
+                ">" -> { return CmpOp.gt }
+                ">=" -> { return CmpOp.ge }
+                _ -> { return nil }
+            }
+        }
+        let nextKeyword = if pos + 1 < tokens.count && tokens[pos + 1].kind == .keyword { tokens[pos + 1].text } else { "" }
+        if isKw("in") {
+            return CmpOp.inOp
+        }
+        if isKw("is") {
+            return if nextKeyword == "not" { CmpOp.isNot } else { CmpOp.isOp }
+        }
+        if isKw("not") && nextKeyword == "in" {
+            return CmpOp.notIn
+        }
+        nil
+    }
+
+    fn comparison() -> Int {
+        let at = line()
+        let left = bitOr()
+        var ops: [CmpOp] = []
+        var rights: [Int] = []
+        while error == "" {
+            if let op = comparisonOp() {
+                advance()
+                if op == .isNot || op == .notIn {
+                    advance()
+                }
+                ops.append(op)
+                rights.append(bitOr())
+            } else {
+                break
+            }
+        }
+        if ops.isEmpty {
+            return left
+        }
+        add(.compare(left: left, ops: ops, rights: rights), at)
+    }
+
+    fn bitOr() -> Int {
+        var left = bitXor()
+        while isOp("|") && error == "" {
+            let at = line()
+            advance()
+            let right = bitXor()
+            left = add(.binary(op: .bitOr, left: left, right: right), at)
+        }
+        left
+    }
+
+    fn bitXor() -> Int {
+        var left = bitAnd()
+        while isOp("^") && error == "" {
+            let at = line()
+            advance()
+            let right = bitAnd()
+            left = add(.binary(op: .bitXor, left: left, right: right), at)
+        }
+        left
+    }
+
+    fn bitAnd() -> Int {
+        var left = shift()
+        while isOp("&") && error == "" {
+            let at = line()
+            advance()
+            let right = shift()
+            left = add(.binary(op: .bitAnd, left: left, right: right), at)
+        }
+        left
+    }
+
+    fn shift() -> Int {
+        var left = arithmetic()
+        while (isOp("<<") || isOp(">>")) && error == "" {
+            let at = line()
+            let op = if text() == "<<" { BinOp.lshift } else { BinOp.rshift }
+            advance()
+            let right = arithmetic()
+            left = add(.binary(op: op, left: left, right: right), at)
+        }
+        left
+    }
+
+    fn arithmetic() -> Int {
+        var left = term()
+        while (isOp("+") || isOp("-")) && error == "" {
+            let at = line()
+            let op = if text() == "+" { BinOp.add } else { BinOp.sub }
+            advance()
+            let right = term()
+            left = add(.binary(op: op, left: left, right: right), at)
+        }
+        left
+    }
+
+    fn term() -> Int {
+        var left = factor()
+        while kind() == .op && error == "" {
+            let at = line()
+            var op = BinOp.mul
+            match text() {
+                "*" -> { op = .mul }
+                "/" -> { op = .div }
+                "//" -> { op = .floorDiv }
+                "%" -> { op = .mod }
+                _ -> { return left }
+            }
+            advance()
+            let right = factor()
+            left = add(.binary(op: op, left: left, right: right), at)
+        }
+        left
+    }
+
+    fn factor() -> Int {
+        let at = line()
+        if acceptOp("-") {
+            let operand = factor()
+            // (A negative number is a number, not an operation.)
+            match nodes[operand] {
+                .intLit(v) -> { return add(.intLit(value: (0).wrappingSubtract(v)), at) }
+                .floatLit(v) -> { return add(.floatLit(value: -v), at) }
+                _ -> {}
+            }
+            return add(.unary(op: .neg, operand: operand), at)
+        }
+        if acceptOp("+") {
+            return add(.unary(op: .pos, operand: factor()), at)
+        }
+        if acceptOp("~") {
+            return add(.unary(op: .invert, operand: factor()), at)
+        }
+        power()
+    }
+
+    fn power() -> Int {
+        let at = line()
+        let base = primary()
+        if acceptOp("**") {
+            // (Binds tighter than a `-` on its left, looser on its right: -2 ** -2.)
+            let exponent = factor()
+            return add(.binary(op: .pow, left: base, right: exponent), at)
+        }
+        base
+    }
+
+    fn primary() -> Int {
+        var value = atom()
+        while error == "" {
+            let at = line()
+            if acceptOp("(") {
+                value = callArguments(value, at)
+            } else if acceptOp("[") {
+                let index = subscriptIndex()
+                expectOp("]")
+                value = add(.subscript(object: value, index: index), at)
+            } else if acceptOp(".") {
+                // (Keywords can be attribute names in f-strings and the like: not here.)
+                let name = expectName()
+                value = add(.attr(object: value, name: name), at)
+            } else {
+                break
+            }
+        }
+        value
+    }
+
+    fn callArguments(_ callee: Int, _ at: Int) -> Int {
+        var args: [Int] = []
+        var names: [String] = []
+        while !isOp(")") && error == "" {
+            if acceptOp("**") {
+                args.append(expression())
+                names.append("**")
+            } else if acceptOp("*") {
+                args.append(expression())
+                names.append("*")
+            } else if kind() == .name && nextIsOp("=") {
+                let name = text()
+                advance()
+                advance()
+                args.append(expression())
+                names.append(name)
+            } else {
+                let argLine = line()
+                var value = namedExpression()
+                if isKw("for") {
+                    // f(x for x in xs): a generator as the only argument.
+                    value = comprehension(3, value, -1, argLine)
+                }
+                args.append(value)
+                names.append("")
+            }
+            if !acceptOp(",") {
+                break
+            }
+        }
+        expectOp(")")
+        add(.call(callee: callee, args: args, names: names), at)
+    }
+
+    // What's in `[…]` after a value: an index, a slice, or several (a tuple).
+    fn subscriptIndex() -> Int {
+        let at = line()
+        let first = sliceOrExpression()
+        if !isOp(",") {
+            return first
+        }
+        var items = [first]
+        while acceptOp(",") && error == "" {
+            if isOp("]") {
+                break
+            }
+            items.append(sliceOrExpression())
+        }
+        add(.tupleLit(items: items), at)
+    }
+
+    fn sliceOrExpression() -> Int {
+        let at = line()
+        var lower = -1
+        var upper = -1
+        var step = -1
+        if !isOp(":") {
+            lower = namedExpression()
+            if !isOp(":") {
+                return lower
+            }
+        }
+        expectOp(":")
+        if !isOp(":") && !isOp("]") && !isOp(",") {
+            upper = expression()
+        }
+        if acceptOp(":") {
+            if !isOp("]") && !isOp(",") {
+                step = expression()
+            }
+        }
+        add(.slice(lower: lower, upper: upper, step: step), at)
+    }
+
+    // `for target in iter if cond …` after a comprehension's element.
+    fn comprehension(_ compKind: Int, _ element: Int, _ value: Int, _ at: Int) -> Int {
+        var targets: [Int] = []
+        var iters: [Int] = []
+        var conds: [[Int]] = []
+        while acceptKw("for") && error == "" {
+            targets.append(targetList())
+            expectKw("in")
+            iters.append(orTest())
+            var tests: [Int] = []
+            while acceptKw("if") && error == "" {
+                tests.append(orTest())
+            }
+            conds.append(tests)
+        }
+        add(.comp(kind: compKind, element: element, value: value, targets: targets, iters: iters, conds: conds), at)
+    }
+
+    fn atom() -> Int {
+        let at = line()
+        let k = kind()
+        let t = text()
+        if k == .name {
+            advance()
+            return add(.name(id: t), at)
+        }
+        if k == .int {
+            advance()
+            if let v = Int(t) {
+                return add(.intLit(value: v), at)
+            }
+            if t == "9223372036854775808" {
+                // (Only as -9223372036854775808, the smallest integer: the
+                // `-` before it turns it into that.)
+                return add(.intLit(value: -9223372036854775807 - 1), at)
+            }
+            fail("integer literal too large (Adder's integers are 64-bit)")
+            return 0
+        }
+        if k == .float {
+            advance()
+            return add(.floatLit(value: Float(t) ?? 0.0), at)
+        }
+        if k == .str || k == .fstr {
+            return strings()
+        }
+        if k == .keyword {
+            if t == "None" {
+                advance()
+                return add(.noneLit, at)
+            }
+            if t == "True" {
+                advance()
+                return add(.trueLit, at)
+            }
+            if t == "False" {
+                advance()
+                return add(.falseLit, at)
+            }
+            if t == "lambda" {
+                return lambdaExpression()
+            }
+            if t == "yield" {
+                return yieldExpression()
+            }
+            fail("invalid syntax")
+            advance()
+            return 0
+        }
+        if k == .op {
+            if t == "(" {
+                advance()
+                return parenthesized(at)
+            }
+            if t == "[" {
+                advance()
+                return listDisplay(at)
+            }
+            if t == "\{" {
+                advance()
+                return braceDisplay(at)
+            }
+            if t == "..." {
+                advance()
+                return add(.noneLit, at)
+            }
+        }
+        fail(if k == .indent { "unexpected indent" } else { "invalid syntax" })
+        advance()
+        0
+    }
+
+    fn parenthesized(_ at: Int) -> Int {
+        if acceptOp(")") {
+            return add(.tupleLit(items: []), at)
+        }
+        if isKw("yield") {
+            let y = yieldExpression()
+            expectOp(")")
+            return y
+        }
+        let first = starOrExpression()
+        if isKw("for") {
+            let c = comprehension(3, first, -1, at)
+            expectOp(")")
+            return c
+        }
+        if !isOp(",") {
+            expectOp(")")
+            return first
+        }
+        var items = [first]
+        while acceptOp(",") && error == "" {
+            if isOp(")") {
+                break
+            }
+            items.append(starOrExpression())
+        }
+        expectOp(")")
+        add(.tupleLit(items: items), at)
+    }
+
+    fn listDisplay(_ at: Int) -> Int {
+        if acceptOp("]") {
+            return add(.listLit(items: []), at)
+        }
+        let first = starOrExpression()
+        if isKw("for") {
+            let c = comprehension(0, first, -1, at)
+            expectOp("]")
+            return c
+        }
+        var items = [first]
+        while acceptOp(",") && error == "" {
+            if isOp("]") {
+                break
+            }
+            items.append(starOrExpression())
+        }
+        expectOp("]")
+        add(.listLit(items: items), at)
+    }
+
+    // {…}: a dictionary, a set, or a comprehension of either.
+    fn braceDisplay(_ at: Int) -> Int {
+        if acceptOp("\}") {
+            return add(.dictLit(keys: [], values: []), at)
+        }
+        var keys: [Int] = []
+        var values: [Int] = []
+        if acceptOp("**") {
+            keys.append(-1)
+            values.append(bitOr())
+        } else {
+            let first = starOrExpression()
+            if !isOp(":") {
+                // A set.
+                if isKw("for") {
+                    let c = comprehension(1, first, -1, at)
+                    expectOp("\}")
+                    return c
+                }
+                var items = [first]
+                while acceptOp(",") && error == "" {
+                    if isOp("\}") {
+                        break
+                    }
+                    items.append(starOrExpression())
+                }
+                expectOp("\}")
+                return add(.setLit(items: items), at)
+            }
+            advance()
+            let value = expression()
+            if isKw("for") {
+                let c = comprehension(2, first, value, at)
+                expectOp("\}")
+                return c
+            }
+            keys.append(first)
+            values.append(value)
+        }
+        while acceptOp(",") && error == "" {
+            if isOp("\}") {
+                break
+            }
+            if acceptOp("**") {
+                keys.append(-1)
+                values.append(bitOr())
+            } else {
+                keys.append(expression())
+                expectOp(":")
+                values.append(expression())
+            }
+        }
+        expectOp("\}")
+        add(.dictLit(keys: keys, values: values), at)
+    }
+
+    // ---- strings ----
+
+    // One string literal or several next to each other ("a" "b"), plain or
+    // f-strings.
+    fn strings() -> Int {
+        let at = line()
+        var parts: [Int] = []
+        var plain = ""
+        var onlyPlain = true
+        while (kind() == .str || kind() == .fstr) && error == "" {
+            if kind() == .str {
+                plain += text()
+                advance()
+                continue
+            }
+            onlyPlain = false
+            if plain != "" {
+                parts.append(add(.strLit(value: plain), at))
+                plain = ""
+            }
+            let raw = text()
+            let tokenLine = line()
+            advance()
+            fstringParts(raw.substring(from: 1, to: raw.count), isRaw: raw.hasPrefix("r"), at: tokenLine, into: parts)
+        }
+        if onlyPlain {
+            return add(.strLit(value: plain), at)
+        }
+        if plain != "" {
+            parts.append(add(.strLit(value: plain), at))
+        }
+        add(.joined(parts: parts), at)
+    }
+
+    // Takes an f-string's text apart: the text between `{…}`s, and what's
+    // in them (an expression, with `!r` and `:spec` after it).
+    fn fstringParts(_ source: String, isRaw: Bool, at: Int, into: bind [Int]) {
+        let c = source.characters
+        var literal = ""
+        var i = 0
+        while i < c.count && error == "" {
+            let ch = c[i]
+            if ch == "\{" {
+                if i + 1 < c.count && c[i + 1] == "\{" {
+                    literal += "\{"
+                    i += 2
+                    continue
+                }
+                if literal != "" {
+                    into.append(add(.strLit(value: if isRaw { literal } else { unescape(literal) }), at))
+                    literal = ""
+                }
+                // Up to the `}` that closes it (not one inside brackets or quotes).
+                var depth = 0
+                var quote = ""
+                var j = i + 1
+                var bang = -1
+                var colon = -1
+                while j < c.count {
+                    let x = c[j]
+                    if quote != "" {
+                        if x == quote {
+                            quote = ""
+                        }
+                    } else if x == "'" || x == "\"" {
+                        quote = x
+                    } else if x == "(" || x == "[" || x == "\{" {
+                        depth += 1
+                    } else if x == ")" || x == "]" {
+                        depth -= 1
+                    } else if x == "\}" {
+                        if depth == 0 {
+                            break
+                        }
+                        depth -= 1
+                    } else if depth == 0 && colon < 0 {
+                        if x == "!" && j + 1 < c.count && c[j + 1] != "=" && bang < 0 {
+                            bang = j
+                        } else if x == ":" {
+                            colon = j
+                        }
+                    }
+                    j += 1
+                }
+                if j >= c.count {
+                    failAt("f-string: expecting '\}'", at)
+                    return
+                }
+                var exprEnd = j
+                if colon >= 0 {
+                    exprEnd = colon
+                }
+                if bang >= 0 && bang < exprEnd {
+                    exprEnd = bang
+                }
+                var exprText = c.slice(from: i + 1, to: exprEnd).joined()
+                var conversion = ""
+                if bang >= 0 {
+                    let convEnd = if colon >= 0 { colon } else { j }
+                    conversion = c.slice(from: bang + 1, to: convEnd).joined().trim()
+                }
+                var spec = -1
+                if colon >= 0 {
+                    let specText = c.slice(from: colon + 1, to: j).joined()
+                    if specText.contains("\{") {
+                        var specParts: [Int] = []
+                        fstringParts(specText, isRaw: isRaw, at: at, into: specParts)
+                        spec = add(.joined(parts: specParts), at)
+                    } else {
+                        spec = add(.strLit(value: specText), at)
+                    }
+                }
+                // {x=} shows the expression's text, then its repr.
+                if exprText.trim().hasSuffix("=") && !exprText.trim().hasSuffix("==") {
+                    into.append(add(.strLit(value: exprText), at))
+                    exprText = exprText.trim()
+                    exprText = exprText.substring(from: 0, to: exprText.count - 1)
+                    if conversion == "" && spec < 0 {
+                        conversion = "r"
+                    }
+                }
+                if exprText.trim() == "" {
+                    failAt("f-string: empty expression not allowed", at)
+                    return
+                }
+                let value = subExpression(exprText, at: at)
+                into.append(add(.formatted(value: value, conversion: conversion, spec: spec), at))
+                i = j + 1
+                continue
+            }
+            if ch == "\}" {
+                if i + 1 < c.count && c[i + 1] == "\}" {
+                    literal += "\}"
+                    i += 2
+                    continue
+                }
+                failAt("f-string: single '\}' is not allowed", at)
+                return
+            }
+            literal += ch
+            i += 1
+        }
+        if literal != "" {
+            into.append(add(.strLit(value: if isRaw { literal } else { unescape(literal) }), at))
+        }
+    }
+
+    // Parses an expression written inside an f-string.
+    fn subExpression(_ source: String, at: Int) -> Int {
+        let lexed = tokenize(source)
+        if lexed.error != "" {
+            failAt("f-string: {lexed.error}", at)
+            return 0
+        }
+        var inner: [Token] = []
+        for t in lexed.tokens {
+            inner.append(Token(kind: t.kind, text: t.text, line: at))
+        }
+        let outer = tokens
+        let outerPos = pos
+        tokens = inner
+        pos = 0
+        let value = expressionList()
+        if kind() != .newline && kind() != .eof {
+            fail("f-string: invalid syntax")
+        }
+        tokens = outer
+        pos = outerPos
+        value
+    }
+}
+
+// Parses `source`, adding to `program` (so that what was parsed before,
+// like the functions of earlier lines at the prompt, stays as it is).
+fn parseInto(_ program: bind Program, _ source: String) {
+    program.error = ""
+    program.body = []
+    let lexed = tokenize(source)
+    if lexed.error != "" {
+        program.error = lexed.error
+        program.errorLine = lexed.errorLine
+        return
+    }
+    var parser = Parser(tokens: lexed.tokens, nodes: program.nodes, lines: program.lines, defs: program.defs)
+    if parser.nodes.isEmpty {
+        // (Node 0 stands in for what couldn't be parsed.)
+        parser.nodes.append(.passStmt)
+        parser.lines.append(0)
+    }
+    let body = parser.parseModule()
+    if parser.error != "" {
+        program.error = parser.error
+        program.errorLine = parser.errorLine
+        return
+    }
+    program.nodes = parser.nodes
+    program.lines = parser.lines
+    program.defs = parser.defs
+    program.body = body
+}

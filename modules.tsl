@@ -1,0 +1,999 @@
+// `import`: the modules Adder has built in (math, random, time, sys, os,
+// json, functools, string), and other Python files next to the program.
+
+fn builtinModules() -> [String] {
+    ["math", "random", "time", "sys", "os", "os.path", "json", "functools", "string", "typing"]
+}
+
+// What a built-in module has: its functions, then its other values.
+fn moduleFunctions(_ m: String) -> [String] {
+    match m {
+        "math" -> ["sqrt", "floor", "ceil", "trunc", "fabs", "pow", "exp", "log", "log2", "log10", "sin", "cos", "tan",
+                   "asin", "acos", "atan", "atan2", "degrees", "radians", "hypot", "factorial", "gcd", "lcm", "isnan",
+                   "isinf", "isfinite", "isqrt", "copysign", "fmod", "comb", "perm", "prod", "fsum", "dist", "isclose"]
+        "random" -> ["random", "randint", "randrange", "choice", "shuffle", "uniform", "sample", "seed", "choices"]
+        "time" -> ["time", "sleep", "perf_counter", "monotonic", "process_time", "time_ns"]
+        "sys" -> ["exit"]
+        "os" -> ["getcwd", "listdir", "remove", "mkdir", "makedirs", "getenv"]
+        "os.path" -> ["exists", "isfile", "isdir", "join", "basename", "dirname", "splitext", "abspath"]
+        "json" -> ["dumps", "loads"]
+        "functools" -> ["reduce"]
+        _ -> []
+    }
+}
+
+fn moduleValue(_ it: bind Interp, _ m: String, _ name: String) -> Value {
+    match m {
+        "math" -> {
+            match name {
+                "pi" -> .float(f: pi)
+                "e" -> .float(f: exp(1.0))
+                "tau" -> .float(f: 2.0 * pi)
+                "inf" -> .float(f: 1.0e308 * 10.0)
+                "nan" -> {
+                    let zero = 0.0
+                    Value.float(f: zero / zero)
+                }
+                _ -> .absent
+            }
+        }
+        "sys" -> {
+            match name {
+                "argv" -> {
+                    var out: [Value] = []
+                    for a in it.argv {
+                        out.append(.str(s: a))
+                    }
+                    it.newList(out)
+                }
+                "maxsize" -> .int(i: 9223372036854775807)
+                "version" -> .str(s: "3.12 (Adder {adderVersion()}, a Python interpreter written in Tessel)")
+                "version_info" -> it.newTuple([.int(i: 3), .int(i: 12), .int(i: 0)])
+                "platform" -> .str(s: if platform() == "macos" { "darwin" } else if platform() == "windows" { "win32" } else { "linux" })
+                "stdout" -> .module(name: "sys.stdout")
+                "stderr" -> .module(name: "sys.stderr")
+                "path" -> it.newList([.str(s: it.scriptDir)])
+                _ -> .absent
+            }
+        }
+        "os" -> {
+            match name {
+                "path" -> .module(name: "os.path")
+                "sep" -> .str(s: if platform() == "windows" { "\\" } else { "/" })
+                "linesep" -> .str(s: "\n")
+                "name" -> .str(s: if platform() == "windows" { "nt" } else { "posix" })
+                _ -> .absent
+            }
+        }
+        "string" -> {
+            match name {
+                "ascii_lowercase" -> .str(s: "abcdefghijklmnopqrstuvwxyz")
+                "ascii_uppercase" -> .str(s: "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+                "ascii_letters" -> .str(s: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+                "digits" -> .str(s: "0123456789")
+                "hexdigits" -> .str(s: "0123456789abcdefABCDEF")
+                "punctuation" -> .str(s: "!\"#$%&'()*+,-./:;<=>?@[\\]^_`\{|\}~")
+                "whitespace" -> .str(s: " \t\n\r")
+                _ -> .absent
+            }
+        }
+        // (Names for annotations: they're never looked at.)
+        "typing" -> .builtin(name: "object")
+        _ -> .absent
+    }
+}
+
+fn moduleAttr(_ it: bind Interp, _ m: String, _ name: String) -> Value {
+    if let e = it.modules[m] {
+        if let v = it.envs[e].vars[name] {
+            return v
+        }
+        return it.throw("AttributeError", "module '{m}' has no attribute '{name}'")
+    }
+    if moduleFunctions(m).contains(name) {
+        return .builtin(name: m + "." + name)
+    }
+    if m == "sys.stdout" || m == "sys.stderr" {
+        if name == "write" || name == "flush" {
+            return .builtin(name: m + "." + name)
+        }
+    }
+    let v = moduleValue(it, m, name)
+    if v != Value.absent {
+        return v
+    }
+    it.throw("AttributeError", "module '{m}' has no attribute '{name}'")
+}
+
+fn importModule(_ it: bind Interp, _ name: String) -> Value {
+    if builtinModules().contains(name) {
+        return .module(name: name)
+    }
+    if it.modules.contains(key: name) {
+        return .module(name: name)
+    }
+    // A file next to the program: helpers.py for `import helpers`.
+    let path = joinPath(it.scriptDir, name.replace(".", with: "/") + ".py")
+    if let source = readFile(path: path) {
+        parseInto(it.prog, source)
+        if it.prog.error != "" {
+            return it.throw("SyntaxError", "{it.prog.error} ({name}.py, line {it.prog.errorLine})")
+        }
+        let body = it.prog.body
+        let e = it.newEnv(0)
+        it.envs[e].captured = true
+        it.envs[e].vars["__name__"] = .str(s: name)
+        it.modules[name] = e
+        let savedEnv = it.env
+        let savedName = it.funcName
+        it.env = e
+        it.funcName = "<module>"
+        it.execBlock(body)
+        it.env = savedEnv
+        it.funcName = savedName
+        if it.signal != .none {
+            it.modules.removeValue(forKey: name)
+            return Value.none
+        }
+        return .module(name: name)
+    }
+    it.throw("ModuleNotFoundError", "No module named '{name}'")
+}
+
+// from module import *
+fn importAll(_ it: bind Interp, _ m: Value) {
+    match m {
+        .module(name) -> {
+            if let e = it.modules[name] {
+                for (k, v) in it.envs[e].vars {
+                    if !k.hasPrefix("_") {
+                        it.setVar(k, v)
+                    }
+                }
+                return
+            }
+            for f in moduleFunctions(name) {
+                it.setVar(f, .builtin(name: name + "." + f))
+            }
+            for constant in ["pi", "e", "tau", "inf", "nan"] {
+                let v = moduleValue(it, name, constant)
+                if v != Value.absent && name == "math" {
+                    it.setVar(constant, v)
+                }
+            }
+        }
+        _ -> {}
+    }
+}
+
+fn numberArg(_ it: bind Interp, _ args: [Value], _ at: Int) -> Float {
+    if at < args.count {
+        if let x = floatOf(args[at]) {
+            return x
+        }
+        it.throw("TypeError", "must be real number, not {typeName(it, args[at])}")
+        return 0.0
+    }
+    it.throw("TypeError", "a number is missing: {at + 1} were expected, {args.count} given")
+    0.0
+}
+
+fn wholeArg(_ it: bind Interp, _ args: [Value], _ at: Int) -> Int {
+    if at < args.count {
+        if let n = intOf(args[at]) {
+            return n
+        }
+        it.throw("TypeError", "'{typeName(it, args[at])}' object cannot be interpreted as an integer")
+        return 0
+    }
+    it.throw("TypeError", "a number is missing: {at + 1} were expected, {args.count} given")
+    0
+}
+
+fn gcdOf(_ a: Int, _ b: Int) -> Int {
+    var x = if a < 0 { -a } else { a }
+    var y = if b < 0 { -b } else { b }
+    while y != 0 {
+        let r = x % y
+        x = y
+        y = r
+    }
+    x
+}
+
+// A float that's a whole number, as an int (floor, ceil, trunc give ints).
+fn wholeFloat(_ it: bind Interp, _ x: Float) -> Value {
+    if x.isNaN {
+        return it.throw("ValueError", "cannot convert float NaN to integer")
+    }
+    if !x.isFinite {
+        return it.throw("OverflowError", "cannot convert float infinity to integer")
+    }
+    if x >= 9.3e18 || x <= -9.3e18 {
+        return tooLarge(it)
+    }
+    Value.int(i: Int(x))
+}
+
+fn mathCall(_ it: bind Interp, _ name: String, _ args: [Value]) -> Value {
+    match name {
+        "sqrt" -> {
+            let x = numberArg(it, args, 0)
+            if x < 0.0 {
+                return it.throw("ValueError", "math domain error")
+            }
+            Value.float(f: sqrt(x))
+        }
+        "floor" -> {
+            if let n = intOf(args.first ?? Value.none) {
+                return .int(i: n)
+            }
+            wholeFloat(it, floor(numberArg(it, args, 0)))
+        }
+        "ceil" -> {
+            if let n = intOf(args.first ?? Value.none) {
+                return .int(i: n)
+            }
+            wholeFloat(it, ceil(numberArg(it, args, 0)))
+        }
+        "trunc" -> {
+            let x = numberArg(it, args, 0)
+            wholeFloat(it, if x < 0.0 { ceil(x) } else { floor(x) })
+        }
+        "fabs" -> .float(f: abs(numberArg(it, args, 0)))
+        "pow" -> floatOp(it, .pow, numberArg(it, args, 0), numberArg(it, args, 1), .none, .none)
+        "exp" -> .float(f: exp(numberArg(it, args, 0)))
+        "log" -> {
+            let x = numberArg(it, args, 0)
+            if x <= 0.0 {
+                return it.throw("ValueError", "math domain error")
+            }
+            if args.count > 1 {
+                let base = numberArg(it, args, 1)
+                if base <= 0.0 || base == 1.0 {
+                    return it.throw("ValueError", "math domain error")
+                }
+                return .float(f: log(x) / log(base))
+            }
+            Value.float(f: log(x))
+        }
+        "log2" -> {
+            let x = numberArg(it, args, 0)
+            if x <= 0.0 {
+                return it.throw("ValueError", "math domain error")
+            }
+            Value.float(f: log(x) / log(2.0))
+        }
+        "log10" -> {
+            let x = numberArg(it, args, 0)
+            if x <= 0.0 {
+                return it.throw("ValueError", "math domain error")
+            }
+            Value.float(f: log10(x))
+        }
+        "sin" -> .float(f: sin(numberArg(it, args, 0)))
+        "cos" -> .float(f: cos(numberArg(it, args, 0)))
+        "tan" -> .float(f: tan(numberArg(it, args, 0)))
+        "asin" -> .float(f: asin(numberArg(it, args, 0)))
+        "acos" -> .float(f: acos(numberArg(it, args, 0)))
+        "atan" -> .float(f: atan(numberArg(it, args, 0)))
+        "atan2" -> .float(f: atan2(numberArg(it, args, 0), numberArg(it, args, 1)))
+        "degrees" -> .float(f: numberArg(it, args, 0) * 180.0 / pi)
+        "radians" -> .float(f: numberArg(it, args, 0) * pi / 180.0)
+        "hypot" -> {
+            var total = 0.0
+            for i in args.indices {
+                let x = numberArg(it, args, i)
+                total += x * x
+            }
+            Value.float(f: sqrt(total))
+        }
+        "dist" -> {
+            if args.count != 2 {
+                return it.throw("TypeError", "dist expected 2 arguments, got {args.count}")
+            }
+            let p = iterate(it, args[0])
+            let q = iterate(it, args[1])
+            if it.signal != .none {
+                return Value.none
+            }
+            if p.count != q.count {
+                return it.throw("ValueError", "both points must have the same number of dimensions")
+            }
+            var total = 0.0
+            for i in p.indices {
+                let d = (floatOf(p[i]) ?? 0.0) - (floatOf(q[i]) ?? 0.0)
+                total += d * d
+            }
+            Value.float(f: sqrt(total))
+        }
+        "factorial" -> {
+            let n = wholeArg(it, args, 0)
+            if n < 0 {
+                return it.throw("ValueError", "factorial() not defined for negative values")
+            }
+            var result = 1
+            if n > 1 {
+                for i in 2..(n + 1) {
+                    if let r = mulChecked(result, i) {
+                        result = r
+                    } else {
+                        return tooLarge(it)
+                    }
+                }
+            }
+            Value.int(i: result)
+        }
+        "gcd" -> {
+            var g = 0
+            for i in args.indices {
+                g = gcdOf(g, wholeArg(it, args, i))
+            }
+            Value.int(i: g)
+        }
+        "lcm" -> {
+            var l = 1
+            for i in args.indices {
+                let n = wholeArg(it, args, i)
+                if n == 0 {
+                    return .int(i: 0)
+                }
+                l = l / gcdOf(l, n) * (if n < 0 { -n } else { n })
+            }
+            Value.int(i: l)
+        }
+        "isnan" -> .bool(b: numberArg(it, args, 0).isNaN)
+        "isinf" -> {
+            let x = numberArg(it, args, 0)
+            Value.bool(b: !x.isNaN && !x.isFinite)
+        }
+        "isfinite" -> .bool(b: numberArg(it, args, 0).isFinite)
+        "isqrt" -> {
+            let n = wholeArg(it, args, 0)
+            if n < 0 {
+                return it.throw("ValueError", "isqrt() argument must be nonnegative")
+            }
+            var r = Int(sqrt(Float(n)))
+            while r * r > n {
+                r -= 1
+            }
+            while (r + 1) * (r + 1) <= n {
+                r += 1
+            }
+            Value.int(i: r)
+        }
+        "copysign" -> {
+            let x = abs(numberArg(it, args, 0))
+            let y = numberArg(it, args, 1)
+            Value.float(f: if y < 0.0 || (y == 0.0 && 1.0 / y < 0.0) { -x } else { x })
+        }
+        "fmod" -> {
+            let x = numberArg(it, args, 0)
+            let y = numberArg(it, args, 1)
+            if y == 0.0 {
+                return it.throw("ValueError", "math domain error")
+            }
+            // (The result has x's sign, unlike `%`.)
+            let q = x / y
+            Value.float(f: x - y * (if q < 0.0 { ceil(q) } else { floor(q) }))
+        }
+        "comb", "perm" -> {
+            let n = wholeArg(it, args, 0)
+            let k = if args.count > 1 { wholeArg(it, args, 1) } else { n }
+            if n < 0 || k < 0 {
+                return it.throw("ValueError", "n and k must be non-negative integers")
+            }
+            if k > n {
+                return .int(i: 0)
+            }
+            var result = 1
+            if name == "perm" {
+                if k > 0 {
+                    for i in 0..k {
+                        if let r = mulChecked(result, n - i) {
+                            result = r
+                        } else {
+                            return tooLarge(it)
+                        }
+                    }
+                }
+                return .int(i: result)
+            }
+            let small = if k < n - k { k } else { n - k }
+            if small > 0 {
+                for i in 0..small {
+                    if let r = mulChecked(result, n - i) {
+                        result = r / (i + 1)
+                    } else {
+                        return tooLarge(it)
+                    }
+                }
+            }
+            Value.int(i: result)
+        }
+        "prod" -> {
+            let items = iterate(it, args.first ?? Value.none)
+            if it.signal != .none {
+                return Value.none
+            }
+            var total = Value.int(i: 1)
+            for item in items {
+                total = binaryOp(it, .mul, total, item)
+                if it.signal != .none {
+                    return Value.none
+                }
+            }
+            total
+        }
+        "fsum" -> {
+            let items = iterate(it, args.first ?? Value.none)
+            if it.signal != .none {
+                return Value.none
+            }
+            var total = 0.0
+            for item in items {
+                total += floatOf(item) ?? 0.0
+            }
+            Value.float(f: total)
+        }
+        "isclose" -> {
+            let a = numberArg(it, args, 0)
+            let b = numberArg(it, args, 1)
+            let larger = if abs(a) > abs(b) { abs(a) } else { abs(b) }
+            Value.bool(b: a == b || abs(a - b) <= 1.0e-9 * larger)
+        }
+        _ -> it.throw("AttributeError", "module 'math' has no attribute '{name}'")
+    }
+}
+
+fn randomCall(_ it: bind Interp, _ name: String, _ args: [Value]) -> Value {
+    match name {
+        "random" -> .float(f: randomFloat())
+        "uniform" -> {
+            let a = numberArg(it, args, 0)
+            let b = numberArg(it, args, 1)
+            Value.float(f: a + (b - a) * randomFloat())
+        }
+        "randint" -> {
+            let a = wholeArg(it, args, 0)
+            let b = wholeArg(it, args, 1)
+            if it.signal != .none {
+                return Value.none
+            }
+            if b < a {
+                return it.throw("ValueError", "empty range for randint() ({a}, {b})")
+            }
+            Value.int(i: random(a..(b + 1)))
+        }
+        "randrange" -> {
+            var start = 0
+            var stop = wholeArg(it, args, 0)
+            var step = 1
+            if args.count > 1 {
+                start = stop
+                stop = wholeArg(it, args, 1)
+            }
+            if args.count > 2 {
+                step = wholeArg(it, args, 2)
+            }
+            if it.signal != .none {
+                return Value.none
+            }
+            let count = rangeLength(start, stop, if step == 0 { 1 } else { step })
+            if count <= 0 || step == 0 {
+                return it.throw("ValueError", "empty range for randrange()")
+            }
+            Value.int(i: start + step * random(0..count))
+        }
+        "choice" -> {
+            let items = iterate(it, args.first ?? Value.none)
+            if it.signal != .none {
+                return Value.none
+            }
+            if items.isEmpty {
+                return it.throw("IndexError", "Cannot choose from an empty sequence")
+            }
+            items[random(0..items.count)]
+        }
+        "choices" -> {
+            let items = iterate(it, args.first ?? Value.none)
+            if it.signal != .none {
+                return Value.none
+            }
+            if items.isEmpty {
+                return it.throw("IndexError", "Cannot choose from an empty sequence")
+            }
+            var out: [Value] = []
+            let k = if args.count > 1 { wholeArg(it, args, 1) } else { 1 }
+            if k > 0 {
+                for _ in 0..k {
+                    out.append(items[random(0..items.count)])
+                }
+            }
+            it.newList(out)
+        }
+        "shuffle" -> {
+            match args.first ?? Value.none {
+                .list(id) -> {
+                    it.lists[id] = it.lists[id].shuffled()
+                    Value.none
+                }
+                _ -> it.throw("TypeError", "shuffle() needs a list")
+            }
+        }
+        "sample" -> {
+            let items = iterate(it, args.first ?? Value.none)
+            let k = wholeArg(it, args, 1)
+            if it.signal != .none {
+                return Value.none
+            }
+            if k < 0 || k > items.count {
+                return it.throw("ValueError", "Sample larger than population or is negative")
+            }
+            it.newList(items.shuffled().prefix(k))
+        }
+        // (Adder's random numbers can't be started from a seed.)
+        "seed" -> .none
+        _ -> it.throw("AttributeError", "module 'random' has no attribute '{name}'")
+    }
+}
+
+fn pathCall(_ it: bind Interp, _ name: String, _ args: [Value]) -> Value {
+    var texts: [String] = []
+    for a in args {
+        match a {
+            .str(s) -> { texts.append(s) }
+            _ -> { return it.throw("TypeError", "expected str, not {typeName(it, a)}") }
+        }
+    }
+    if texts.isEmpty {
+        return it.throw("TypeError", "os.path.{name}() needs a path")
+    }
+    let p = texts[0]
+    match name {
+        "exists" -> .bool(b: fileExists(path: p) || isFolder(path: p))
+        "isfile" -> .bool(b: fileExists(path: p) && !isFolder(path: p))
+        "isdir" -> .bool(b: isFolder(path: p))
+        "join" -> {
+            var out = p
+            for i in 1..texts.count {
+                out = if texts[i].hasPrefix("/") { texts[i] } else if out == "" || out.hasSuffix("/") { out + texts[i] } else { out + "/" + texts[i] }
+            }
+            Value.str(s: out)
+        }
+        "basename" -> .str(s: if let at = p.findLast("/") { p.substring(from: at + 1, to: p.count) } else { p })
+        "dirname" -> .str(s: if let at = p.findLast("/") { p.substring(from: 0, to: if at == 0 { 1 } else { at }) } else { "" })
+        "splitext" -> {
+            let base = if let at = p.findLast("/") { at + 1 } else { 0 }
+            if let dot = p.findLast(".") {
+                if dot > base {
+                    return it.newTuple([.str(s: p.substring(from: 0, to: dot)), .str(s: p.substring(from: dot, to: p.count))])
+                }
+            }
+            it.newTuple([.str(s: p), .str(s: "")])
+        }
+        "abspath" -> .str(s: if p.hasPrefix("/") { p } else { joinPath(currentFolder(), p) })
+        _ -> it.throw("AttributeError", "module 'os.path' has no attribute '{name}'")
+    }
+}
+
+// A built-in module's function: math.sqrt(2).
+fn moduleCall(_ it: bind Interp, _ m: String, _ name: String, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
+    if let e = it.modules[m] {
+        if let f = it.envs[e].vars[name] {
+            return it.callValue(f, args, kwNames, kwValues)
+        }
+        return it.throw("AttributeError", "module '{m}' has no attribute '{name}'")
+    }
+    match m {
+        "math" -> mathCall(it, name, args)
+        "random" -> randomCall(it, name, args)
+        "os.path" -> pathCall(it, name, args)
+        "json" -> {
+            if name == "dumps" {
+                if args.isEmpty {
+                    return it.throw("TypeError", "dumps() missing 1 required positional argument: 'obj'")
+                }
+                var indent = -1
+                match keyword(kwNames, kwValues, "indent") {
+                    .int(i) -> { indent = i }
+                    _ -> {}
+                }
+                let sortKeys = keyword(kwNames, kwValues, "sort_keys") == Value.bool(b: true)
+                var out = ""
+                jsonWrite(it, args[0], indent, 0, sortKeys, out)
+                if it.signal != .none {
+                    return Value.none
+                }
+                return .str(s: out)
+            }
+            if name == "loads" {
+                match args.first ?? Value.none {
+                    .str(s) -> {
+                        var reader = JsonReader(c: s.characters)
+                        let v = reader.value(it)
+                        reader.skipSpace()
+                        if reader.error == "" && reader.pos < reader.c.count {
+                            reader.error = "Extra data"
+                        }
+                        if reader.error != "" {
+                            return it.throw("ValueError", "{reader.error}: line 1 column {reader.pos + 1} (char {reader.pos})")
+                        }
+                        return v
+                    }
+                    _ -> { return it.throw("TypeError", "the JSON object must be str") }
+                }
+            }
+            it.throw("AttributeError", "module 'json' has no attribute '{name}'")
+        }
+        "time" -> {
+            match name {
+                "time" -> .float(f: now())
+                "perf_counter", "monotonic", "process_time" -> .float(f: now())
+                "time_ns" -> .int(i: Int(now() * 1000000000.0))
+                "sleep" -> {
+                    let until = now() + numberArg(it, args, 0)
+                    while now() < until {
+                        // (Tessel has no way to wait in a program without a window.)
+                    }
+                    Value.none
+                }
+                _ -> it.throw("AttributeError", "module 'time' has no attribute '{name}'")
+            }
+        }
+        "sys" -> {
+            if name == "exit" {
+                return callBuiltin(it, "exit", args, kwNames, kwValues)
+            }
+            it.throw("AttributeError", "module 'sys' has no attribute '{name}'")
+        }
+        "sys.stdout", "sys.stderr" -> {
+            if name == "write" {
+                let text = toStr(it, args.first ?? Value.str(s: ""))
+                if m == "sys.stderr" {
+                    printError(text, terminator: "")
+                } else {
+                    print(text, terminator: "")
+                }
+                return .int(i: text.count)
+            }
+            Value.none
+        }
+        "os" -> {
+            match name {
+                "getcwd" -> .str(s: currentFolder())
+                "listdir" -> {
+                    var path = "."
+                    match args.first ?? Value.none {
+                        .str(s) -> { path = s }
+                        _ -> {}
+                    }
+                    if let names = listFolder(path: path) {
+                        var out: [Value] = []
+                        for n in names {
+                            out.append(.str(s: n))
+                        }
+                        return it.newList(out)
+                    }
+                    it.throw("FileNotFoundError", "[Errno 2] No such file or directory: {strRepr(path)}")
+                }
+                "remove" -> {
+                    match args.first ?? Value.none {
+                        .str(s) -> {
+                            if !deleteFile(path: s) {
+                                return it.throw("FileNotFoundError", "[Errno 2] No such file or directory: {strRepr(s)}")
+                            }
+                            Value.none
+                        }
+                        _ -> it.throw("TypeError", "remove() needs a path")
+                    }
+                }
+                "mkdir", "makedirs" -> {
+                    match args.first ?? Value.none {
+                        .str(s) -> {
+                            createFolder(path: s)
+                            Value.none
+                        }
+                        _ -> it.throw("TypeError", "{name}() needs a path")
+                    }
+                }
+                "getenv" -> {
+                    match args.first ?? Value.none {
+                        .str(s) -> {
+                            if let v = environment(name: s) {
+                                return .str(s: v)
+                            }
+                            if args.count > 1 { args[1] } else { Value.none }
+                        }
+                        _ -> it.throw("TypeError", "getenv() needs a name")
+                    }
+                }
+                _ -> it.throw("AttributeError", "module 'os' has no attribute '{name}'")
+            }
+        }
+        "functools" -> {
+            if name == "reduce" {
+                if args.count < 2 {
+                    return it.throw("TypeError", "reduce expected at least 2 arguments, got {args.count}")
+                }
+                var items = iterate(it, args[1])
+                if it.signal != .none {
+                    return Value.none
+                }
+                var total = Value.none
+                if args.count > 2 {
+                    total = args[2]
+                } else if items.isEmpty {
+                    return it.throw("TypeError", "reduce() of empty iterable with no initial value")
+                } else {
+                    total = items.removeFirst()
+                }
+                for item in items {
+                    total = it.callValue(args[0], [total, item], [], [])
+                    if it.signal != .none {
+                        return Value.none
+                    }
+                }
+                return total
+            }
+            it.throw("AttributeError", "module 'functools' has no attribute '{name}'")
+        }
+        _ -> it.throw("AttributeError", "module '{m}' has no attribute '{name}'")
+    }
+}
+
+// ---- json ----
+
+fn jsonString(_ s: String) -> String {
+    var out = "\""
+    for c in s.characters {
+        if c == "\"" {
+            out += "\\\""
+        } else if c == "\\" {
+            out += "\\\\"
+        } else if c == "\n" {
+            out += "\\n"
+        } else if c == "\t" {
+            out += "\\t"
+        } else if c == "\r" {
+            out += "\\r"
+        } else {
+            out += c
+        }
+    }
+    out + "\""
+}
+
+fn jsonWriteList(_ it: bind Interp, _ items: [Value], _ indent: Int, _ level: Int, _ sortKeys: Bool, _ out: bind String) {
+    let line = if indent >= 0 { "\n" + " ".repeated(indent * (level + 1)) } else { "" }
+    let close = if indent >= 0 { "\n" + " ".repeated(indent * level) } else { "" }
+    let comma = if indent >= 0 { "," } else { ", " }
+    if items.isEmpty {
+        out += "[]"
+        return
+    }
+    out += "["
+    for i in items.indices {
+        if i > 0 {
+            out += comma
+        }
+        out += line
+        jsonWrite(it, items[i], indent, level + 1, sortKeys, out)
+        if it.signal != .none {
+            return
+        }
+    }
+    out += close + "]"
+}
+
+fn jsonWrite(_ it: bind Interp, _ v: Value, _ indent: Int, _ level: Int, _ sortKeys: Bool, _ out: bind String) {
+    let line = if indent >= 0 { "\n" + " ".repeated(indent * (level + 1)) } else { "" }
+    let close = if indent >= 0 { "\n" + " ".repeated(indent * level) } else { "" }
+    let comma = if indent >= 0 { "," } else { ", " }
+    match v {
+        .none -> { out += "null" }
+        .bool(b) -> { out += if b { "true" } else { "false" } }
+        .int(i) -> { out += "{i}" }
+        .float(f) -> { out += if f.isNaN { "NaN" } else if !f.isFinite { if f > 0.0 { "Infinity" } else { "-Infinity" } } else { floatRepr(f) } }
+        .str(s) -> { out += jsonString(s) }
+        .list(id) -> jsonWriteList(it, it.lists[id], indent, level, sortKeys, out)
+        .tuple(id) -> jsonWriteList(it, it.lists[id], indent, level, sortKeys, out)
+        .dict(id) -> {
+            var keys = dictKeys(it.dicts[id])
+            if keys.isEmpty {
+                out += "\{\}"
+                return
+            }
+            if sortKeys {
+                keys = sortValues(it, keys, .absent, false)
+            }
+            out += "\{"
+            for i in keys.indices {
+                if i > 0 {
+                    out += comma
+                }
+                out += line
+                match keys[i] {
+                    .str(s) -> { out += jsonString(s) }
+                    .int(n) -> { out += "\"{n}\"" }
+                    _ -> {
+                        it.throw("TypeError", "keys must be str, int, float, bool or None, not {typeName(it, keys[i])}")
+                        return
+                    }
+                }
+                out += ": "
+                jsonWrite(it, dictGet(it.dicts[id], hashKey(it, keys[i])), indent, level + 1, sortKeys, out)
+                if it.signal != .none {
+                    return
+                }
+            }
+            out += close + "\}"
+        }
+        _ -> {
+            it.throw("TypeError", "Object of type {typeName(it, v)} is not JSON serializable")
+        }
+    }
+}
+
+struct JsonReader {
+    c: [String]
+    pos: Int = 0
+    error: String = ""
+
+    fn skipSpace() {
+        while pos < c.count && (c[pos] == " " || c[pos] == "\n" || c[pos] == "\t" || c[pos] == "\r") {
+            pos += 1
+        }
+    }
+
+    fn word(_ text: String) -> Bool {
+        let w = text.characters
+        if pos + w.count > c.count {
+            return false
+        }
+        for i in w.indices {
+            if c[pos + i] != w[i] {
+                return false
+            }
+        }
+        pos += w.count
+        true
+    }
+
+    fn string() -> String {
+        // (At the opening quote.)
+        pos += 1
+        var out = ""
+        while pos < c.count && c[pos] != "\"" {
+            if c[pos] == "\\" && pos + 1 < c.count {
+                let e = c[pos + 1]
+                pos += 2
+                if e == "n" {
+                    out += "\n"
+                } else if e == "t" {
+                    out += "\t"
+                } else if e == "r" {
+                    out += "\r"
+                } else if e == "u" && pos + 4 <= c.count {
+                    out += chrOf(hexValue(c.slice(from: pos, to: pos + 4).joined()))
+                    pos += 4
+                } else if e == "b" {
+                    out += chrOf(8)
+                } else if e == "f" {
+                    out += chrOf(12)
+                } else {
+                    out += e
+                }
+                continue
+            }
+            out += c[pos]
+            pos += 1
+        }
+        if pos >= c.count {
+            error = "Unterminated string starting at"
+            return out
+        }
+        pos += 1
+        out
+    }
+
+    fn value(_ it: bind Interp) -> Value {
+        skipSpace()
+        if pos >= c.count {
+            error = "Expecting value"
+            return Value.none
+        }
+        let ch = c[pos]
+        if ch == "\{" {
+            pos += 1
+            let id = it.newDict()
+            skipSpace()
+            if pos < c.count && c[pos] == "\}" {
+                pos += 1
+                return .dict(id: id)
+            }
+            while error == "" {
+                skipSpace()
+                if pos >= c.count || c[pos] != "\"" {
+                    error = "Expecting property name enclosed in double quotes"
+                    break
+                }
+                let key = string()
+                skipSpace()
+                if pos >= c.count || c[pos] != ":" {
+                    error = "Expecting ':' delimiter"
+                    break
+                }
+                pos += 1
+                let v = value(it)
+                dictSet(it.dicts[id], .str(s: key), "s" + key, v)
+                skipSpace()
+                if pos < c.count && c[pos] == "," {
+                    pos += 1
+                    continue
+                }
+                if pos < c.count && c[pos] == "\}" {
+                    pos += 1
+                    break
+                }
+                error = "Expecting ',' delimiter"
+            }
+            return .dict(id: id)
+        }
+        if ch == "[" {
+            pos += 1
+            var items: [Value] = []
+            skipSpace()
+            if pos < c.count && c[pos] == "]" {
+                pos += 1
+                return it.newList(items)
+            }
+            while error == "" {
+                items.append(value(it))
+                skipSpace()
+                if pos < c.count && c[pos] == "," {
+                    pos += 1
+                    continue
+                }
+                if pos < c.count && c[pos] == "]" {
+                    pos += 1
+                    break
+                }
+                error = "Expecting ',' delimiter"
+            }
+            return it.newList(items)
+        }
+        if ch == "\"" {
+            return .str(s: string())
+        }
+        if word("true") {
+            return .bool(b: true)
+        }
+        if word("false") {
+            return .bool(b: false)
+        }
+        if word("null") {
+            return Value.none
+        }
+        // A number.
+        var text = ""
+        while pos < c.count && (isDigitChar(c[pos]) || "+-.eE".contains(c[pos])) {
+            text += c[pos]
+            pos += 1
+        }
+        if text == "" {
+            error = "Expecting value"
+            return Value.none
+        }
+        if !text.contains(".") && !text.contains("e") && !text.contains("E") {
+            if let n = Int(text) {
+                return .int(i: n)
+            }
+        }
+        if let f = Float(text) {
+            return .float(f: f)
+        }
+        error = "Expecting value"
+        Value.none
+    }
+}

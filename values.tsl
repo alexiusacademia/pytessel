@@ -1,0 +1,293 @@
+// Python's values, as the interpreter keeps them.
+//
+// Tessel's own values are copied when they're assigned, and Python's lists,
+// dictionaries and objects aren't: two names can be the same list. So
+// those live in lists of the interpreter (`Interp.lists`, `.dicts`,
+// `.instances`, …), and a `Value` only says which one it is, by its place
+// there. Nothing is ever taken out of them: Adder has no garbage collector
+// (a program that makes millions of lists uses more and more memory).
+
+enum Value {
+    none
+    bool(b: Bool)
+    int(i: Int)
+    float(f: Float)
+    str(s: String)
+    list(id: Int)
+    tuple(id: Int)
+    dict(id: Int)
+    set(id: Int)
+    function(id: Int)
+    builtin(name: String)
+    // A method with the object it's for: `Interp.bounds[id]`.
+    bound(id: Int)
+    klass(id: Int)
+    instance(id: Int)
+    range(start: Int, stop: Int, step: Int)
+    module(name: String)
+    // What `iter`, `map`, `zip`, `enumerate`, … and generators give.
+    iterator(id: Int)
+    file(id: Int)
+    // staticmethod (0), classmethod (1) and property (2) around `cells[id]`.
+    wrapper(kind: Int, id: Int)
+    // super(): the object (`cells[cell]`) seen as the classes after `cls`.
+    superRef(cell: Int, cls: Int)
+    // Not a Python value: a parameter with no default, a deleted entry.
+    absent
+}
+
+// How a statement ended: normally, or on its way out of a loop, a
+// function, or to an `except`.
+enum Signal { none, breakLoop, continueLoop, returning, raising }
+
+// A dictionary (or a set: its keys). Python's keep the order their keys
+// were added in, and can have any hashable value as a key: `index` finds an
+// entry's place by its key written as text (see `hashKey`).
+struct PyDict {
+    keys: [Value] = []
+    vals: [Value] = []
+    index: [String: Int] = [:]
+    // How many entries aren't deleted (deleted ones stay, as `.absent`,
+    // until there are too many).
+    live: Int = 0
+}
+
+fn dictGet(_ d: PyDict, _ hash: String) -> Value {
+    if let i = d.index[hash] {
+        return d.vals[i]
+    }
+    Value.absent
+}
+
+fn dictSet(_ d: bind PyDict, _ key: Value, _ hash: String, _ value: Value) {
+    if let i = d.index[hash] {
+        d.vals[i] = value
+        return
+    }
+    d.index[hash] = d.keys.count
+    d.keys.append(key)
+    d.vals.append(value)
+    d.live += 1
+}
+
+// Removes an entry; false if there was none.
+fn dictRemove(_ d: bind PyDict, _ hash: String) -> Bool {
+    if let i = d.index.removeValue(forKey: hash) {
+        d.keys[i] = Value.absent
+        d.vals[i] = Value.absent
+        d.live -= 1
+        // Mostly deleted entries: pack the rest together.
+        if d.keys.count > 32 && d.live * 2 < d.keys.count {
+            dictPack(d)
+        }
+        return true
+    }
+    false
+}
+
+fn dictPack(_ d: bind PyDict) {
+    var keys: [Value] = []
+    var vals: [Value] = []
+    var moved: [Int] = []
+    for i in d.keys.indices {
+        if d.keys[i] != Value.absent {
+            moved.append(i)
+            keys.append(d.keys[i])
+            vals.append(d.vals[i])
+        }
+    }
+    // (The index goes by the entries' old places.)
+    var places: [Int: Int] = [:]
+    for (to, from) in moved.enumerated() {
+        places[from] = to
+    }
+    var index: [String: Int] = [:]
+    for (hash, at) in d.index {
+        index[hash] = places[at] ?? 0
+    }
+    d.keys = keys
+    d.vals = vals
+    d.index = index
+}
+
+// The entries that are there, in order.
+fn dictKeys(_ d: PyDict) -> [Value] {
+    if d.live == d.keys.count {
+        return d.keys
+    }
+    d.keys.filter { k in k != Value.absent }
+}
+
+fn dictValues(_ d: PyDict) -> [Value] {
+    if d.live == d.keys.count {
+        return d.vals
+    }
+    var out: [Value] = []
+    for i in d.keys.indices {
+        if d.keys[i] != Value.absent {
+            out.append(d.vals[i])
+        }
+    }
+    out
+}
+
+// A function value: a `def` with the variables around it.
+struct Closure {
+    fnId: Int
+    env: Int
+    name: String
+    // The values of its parameters' defaults (`.absent` for none), worked
+    // out when the `def` ran.
+    defaults: [Value] = []
+    // The class it's a method of (-1 if none), for `super()`.
+    owner: Int = -1
+}
+
+struct Bound {
+    receiver: Value
+    method: Value
+}
+
+struct Klass {
+    name: String
+    bases: [Int] = []
+    // The class and the classes it inherits from, in the order attributes
+    // are looked for.
+    mro: [Int] = []
+    attrs: [String: Value] = [:]
+}
+
+struct Instance {
+    cls: Int
+    fields: [String: Value] = [:]
+}
+
+struct PyIter {
+    items: [Value] = []
+    pos: Int = 0
+    // What it says it is: "list_iterator", "map", "generator", …
+    kind: String = "iterator"
+}
+
+struct PyFile {
+    path: String = ""
+    mode: String = "r"
+    // For reading: the lines not read yet.
+    lines: [String] = []
+    pos: Int = 0
+    // For writing: what was written and not saved yet.
+    pending: String = ""
+    closed: Bool = false
+}
+
+// The variables of a module, a function call or a class body.
+struct Env {
+    vars: [String: Value] = [:]
+    parent: Int = -1
+    isClass: Bool = false
+    // A function was made here: it may use these variables later, so they
+    // stay when the call ends.
+    captured: Bool = false
+    globals: [String] = []
+    nonlocals: [String] = []
+}
+
+// ---- text ----
+
+// A float as Python writes it: 1.0, 0.1, 1e+16, 1e-05, inf, nan.
+fn floatRepr(_ f: Float) -> String {
+    if f.isNaN {
+        return "nan"
+    }
+    if !f.isFinite {
+        return if f > 0.0 { "inf" } else { "-inf" }
+    }
+    var s = "{f}"
+    var sign = ""
+    if s.hasPrefix("-") {
+        sign = "-"
+        s = s.substring(from: 1, to: s.count)
+    }
+    if s.contains("e") || s.contains("E") {
+        return sign + s
+    }
+    let parts = s.split(".")
+    let whole = parts[0]
+    let fraction = if parts.count > 1 { parts[1] } else { "" }
+    // The digits, and the power of ten of the first one.
+    var digits = whole + fraction
+    var exponent = whole.count - 1
+    if whole == "0" {
+        let c = fraction.characters
+        var zeros = 0
+        while zeros < c.count && c[zeros] == "0" {
+            zeros += 1
+        }
+        if zeros == c.count {
+            return sign + "0.0"
+        }
+        exponent = -(zeros + 1)
+        digits = fraction.substring(from: zeros, to: fraction.count)
+    }
+    while digits.hasSuffix("0") && digits.count > 1 {
+        digits = digits.substring(from: 0, to: digits.count - 1)
+    }
+    if exponent < -4 || exponent >= 16 {
+        var mantissa = digits.substring(from: 0, to: 1)
+        if digits.count > 1 {
+            mantissa += "." + digits.substring(from: 1, to: digits.count)
+        }
+        let e = if exponent < 0 { -exponent } else { exponent }
+        let pad = if e < 10 { "0" } else { "" }
+        return sign + mantissa + "e" + (if exponent < 0 { "-" } else { "+" }) + pad + "{e}"
+    }
+    if fraction == "" {
+        return sign + whole + ".0"
+    }
+    sign + s
+}
+
+// A string as Python writes it in code: in quotes, with escapes.
+fn strRepr(_ s: String) -> String {
+    let quote = if s.contains("'") && !s.contains("\"") { "\"" } else { "'" }
+    var plain = !s.contains("\\") && !s.contains("\n") && !s.contains("\t") && !s.contains("\r")
+    if quote == "'" && s.contains("'") {
+        plain = false
+    }
+    if plain {
+        return quote + s + quote
+    }
+    var out = quote
+    for c in s.characters {
+        if c == "\\" {
+            out += "\\\\"
+        } else if c == "\n" {
+            out += "\\n"
+        } else if c == "\t" {
+            out += "\\t"
+        } else if c == "\r" {
+            out += "\\r"
+        } else if c == quote {
+            out += "\\" + quote
+        } else {
+            out += c
+        }
+    }
+    out + quote
+}
+
+// An integer in another base, as Python writes it: -0xff.
+fn intInBase(_ value: Int, base: Int, prefix: String) -> String {
+    if value == 0 {
+        return prefix + "0"
+    }
+    let symbols = "0123456789abcdef".characters
+    // (Worked out on the negative side, where the smallest integer fits too.)
+    var n = if value > 0 { -value } else { value }
+    var out: [String] = []
+    while n != 0 {
+        out.append(symbols[-(n % base)])
+        n = n / base
+    }
+    (if value < 0 { "-" } else { "" }) + prefix + out.reversed().joined()
+}

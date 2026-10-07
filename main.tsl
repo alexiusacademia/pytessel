@@ -1,0 +1,290 @@
+// Adder: a Python interpreter written in Tessel.
+//
+//   adder program.py [arguments]    runs a program
+//   adder -c "print(1 + 1)"         runs code given on the command line
+//   adder                           starts the interactive prompt
+//
+// See README.md for what of Python it runs.
+
+fn adderVersion() -> String {
+    "0.1.0"
+}
+
+// An interpreter with Python's built-in names, ready to run a program.
+fn newInterp() -> Interp {
+    var it = Interp(prog: Program(), signal: Signal.none, retval: Value.none, exc: Value.none, curSelf: Value.none)
+    // The first environment has the built-ins; a program's own names go in
+    // the one after it.
+    it.envs.append(Env())
+    for name in builtinNames() {
+        it.envs[0].vars[name] = .builtin(name: name)
+    }
+    let object = makeClass(it, "object", [], [:])
+    it.classIds["object"] = object
+    it.envs[0].vars["object"] = .klass(id: object)
+    for (name, base) in exceptionClasses() {
+        let id = makeClass(it, name, [it.classIds[base] ?? 0], [:])
+        it.classIds[name] = id
+        it.envs[0].vars[name] = .klass(id: id)
+    }
+    it.envs.append(Env(parent: 0))
+    it.envs[1].captured = true
+    it.envs[1].vars["__name__"] = .str(s: "__main__")
+    it.env = 1
+    it
+}
+
+// Says what exception ended the program (or the line at the prompt), as
+// Python does, and forgets it.
+fn reportException(_ it: bind Interp) {
+    let raised = it.exc
+    let lines = it.traceLines
+    let names = it.traceNames
+    it.signal = .none
+    it.exc = .none
+    if it.exiting {
+        return
+    }
+    // `raise SystemExit(2)` ends the program quietly, as exit(2) does.
+    match raised {
+        .instance(id) -> {
+            if it.instances[id].cls == (it.classIds["SystemExit"] ?? -1) {
+                it.exiting = true
+                it.exitCode = 0
+                match it.instances[id].fields["args"] ?? Value.none {
+                    .tuple(t) -> {
+                        if let first = it.lists[t].first {
+                            match first {
+                                .none -> {}
+                                .str(s) -> {
+                                    printError(s)
+                                    it.exitCode = 1
+                                }
+                                _ -> { it.exitCode = intOf(first) ?? 1 }
+                            }
+                        }
+                    }
+                    _ -> {}
+                }
+                return
+            }
+        }
+        _ -> {}
+    }
+    printError("Traceback (most recent call last):")
+    var i = lines.count - 1
+    while i >= 0 {
+        printError("  File \"{it.scriptName}\", line {lines[i]}, in {names[i]}")
+        // The line itself, when it's one of the program's own file.
+        if it.modules.isEmpty && lines[i] >= 1 && lines[i] <= it.sourceLines.count {
+            printError("    " + it.sourceLines[lines[i] - 1].trim())
+        }
+        i -= 1
+    }
+    var kind = "Exception"
+    match raised {
+        .instance(id) -> { kind = it.classes[it.instances[id].cls].name }
+        _ -> {}
+    }
+    let text = toStr(it, raised)
+    it.signal = .none
+    printError(if text == "" { kind } else { "{kind}: {text}" })
+}
+
+fn reportSyntaxError(_ it: bind Interp) {
+    printError("  File \"{it.scriptName}\", line {it.prog.errorLine}")
+    printError("SyntaxError: {it.prog.error}")
+}
+
+// Back to the top after an error at the prompt.
+fn reset(_ it: bind Interp) {
+    it.signal = .none
+    it.env = 1
+    it.depth = 0
+    it.funcName = "<module>"
+    it.curClass = -1
+    it.yields = []
+    it.handling = []
+}
+
+fn closeFiles(_ it: bind Interp) {
+    for id in it.files.indices {
+        if !it.files[id].closed {
+            closeFile(it, id)
+        }
+    }
+}
+
+// Runs a program's text. Gives the status the program ends with.
+fn runProgram(_ it: bind Interp, _ source: String) -> Int {
+    it.sourceLines = source.lines()
+    parseInto(it.prog, source)
+    if it.prog.error != "" {
+        reportSyntaxError(it)
+        return 1
+    }
+    let body = it.prog.body
+    for statement in body {
+        it.exec(statement)
+        if it.signal != .none {
+            break
+        }
+    }
+    var status = 0
+    if it.signal == .raising {
+        reportException(it)
+        status = if it.exiting { it.exitCode } else { 1 }
+    }
+    closeFiles(it)
+    status
+}
+
+// Whether what was typed so far goes on: a block that was opened, a
+// bracket or a string that isn't closed.
+fn needsMore(_ source: String) -> Bool {
+    let lexed = tokenize(source)
+    if lexed.error != "" {
+        return lexed.error.contains("never closed") || lexed.error.contains("triple-quoted")
+    }
+    // A line ending in `:` starts a block; so does a decorator.
+    var last = ""
+    var first = ""
+    for t in lexed.tokens {
+        if t.kind == .op || t.kind == .keyword || t.kind == .name || t.kind == .int || t.kind == .str {
+            last = if t.kind == .op { t.text } else { "x" }
+            if first == "" {
+                first = t.text
+            }
+        }
+    }
+    last == ":" || first == "@" || source.hasSuffix("\\")
+}
+
+fn repl(_ it: bind Interp) {
+    print("Adder {adderVersion()}, a Python interpreter written in Tessel. exit() or Ctrl+D to leave.")
+    while true {
+        print(">>> ", terminator: "")
+        var source = ""
+        if let line = readLine() {
+            source = line
+        } else {
+            print("")
+            break
+        }
+        if source.trim() == "" {
+            continue
+        }
+        // A bracket or a long string that's still open goes on until it's closed.
+        var ended = false
+        while needsBracket(source) && !ended {
+            print("... ", terminator: "")
+            if let line = readLine() {
+                source += "\n" + line
+            } else {
+                ended = true
+            }
+        }
+        if needsMore(source) && !ended {
+            // A block: more lines, until an empty one.
+            while true {
+                print("... ", terminator: "")
+                if let line = readLine() {
+                    if line.trim() == "" && !needsBracket(source) {
+                        break
+                    }
+                    source += "\n" + line
+                } else {
+                    break
+                }
+            }
+        }
+        parseInto(it.prog, source + "\n")
+        if it.prog.error != "" {
+            reportSyntaxError(it)
+            continue
+        }
+        let body = it.prog.body
+        for statement in body {
+            // An expression's value is shown, as Python's prompt does.
+            var shown = false
+            match it.prog.nodes[statement] {
+                .exprStmt(value) -> {
+                    it.line = it.prog.lines[statement]
+                    let v = it.eval(value)
+                    if it.signal == .none && v != Value.none {
+                        let text = toRepr(it, v)
+                        if it.signal == .none {
+                            print(text)
+                        }
+                    }
+                    shown = true
+                }
+                _ -> {}
+            }
+            if !shown {
+                it.exec(statement)
+            }
+            if it.signal != .none {
+                break
+            }
+        }
+        if it.signal != .none {
+            if it.signal == .raising {
+                it.sourceLines = []
+                reportException(it)
+            }
+            reset(it)
+        }
+        if it.exiting {
+            break
+        }
+    }
+    closeFiles(it)
+}
+
+// Whether a bracket or a long string is still open (an empty line doesn't
+// end the input then).
+fn needsBracket(_ source: String) -> Bool {
+    let lexed = tokenize(source)
+    lexed.error.contains("never closed") || lexed.error.contains("triple-quoted")
+}
+
+fn main() {
+    let args = arguments()
+    var it = newInterp()
+    if args.isEmpty {
+        repl(it)
+        exit(if it.exiting { it.exitCode } else { 0 })
+        return
+    }
+    if args[0] == "--version" || args[0] == "-V" {
+        print("Adder {adderVersion()} (Python in Tessel)")
+        return
+    }
+    if args[0] == "-h" || args[0] == "--help" {
+        print("usage: adder [program.py [arguments]] | -c code | --version")
+        return
+    }
+    if args[0] == "-c" {
+        if args.count < 2 {
+            printError("adder: -c needs the code to run")
+            exit(2)
+            return
+        }
+        it.scriptName = "<string>"
+        it.argv = ["-c"] + args.dropFirst(2)
+        it.scriptDir = currentFolder()
+        exit(runProgram(it, args[1] + "\n"))
+        return
+    }
+    let path = args[0]
+    if let source = readFile(path: path) {
+        it.scriptName = path
+        it.argv = args
+        it.scriptDir = if path.contains("/") { path.folder } else { "." }
+        exit(runProgram(it, source + "\n"))
+    } else {
+        printError("adder: can't open file {strRepr(path)}: [Errno 2] No such file or directory")
+        exit(2)
+    }
+}

@@ -1,0 +1,32 @@
+ValueError: zero!
+done 0
+lookup: 'missing' KeyError('missing')
+done 1
+zero division: division by zero
+done 2
+result 10.0
+fine
+done 3
+AppError custom 42 ('custom',) True
+cleanup runs
+try
+IndexError: list index out of range
+KeyError: 'k'
+ValueError: invalid literal for int() with base 10: 'x'
+TypeError: unsupported operand type(s) for +: 'int' and 'str'
+NameError: name 'undefined' is not defined
+AttributeError: 'NoneType' object has no attribute 'x'
+TypeError: object of type 'int' has no len()
+AttributeError: 'str' object has no attribute 'nope'
+IndexError: pop from empty list
+ZeroDivisionError: division by zero
+TypeError: 'int' object is not callable
+AssertionError: no
+StopIteration: 
+handling
+re-raised inner
+bare class TypeError() True
+RecursionError caught
+too many values to unpack (expected 2)
+not enough values to unpack (expected 3, got 1)
+still running

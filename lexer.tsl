@@ -1,0 +1,482 @@
+// The lexer: Python source text to tokens. Python's blocks are made by
+// indentation, so the lexer also says where a block starts (`indent`) and
+// ends (`dedent`), and where a statement's line ends (`newline`).
+
+enum TokKind { name, keyword, int, float, str, fstr, op, newline, indent, dedent, eof }
+
+struct Token {
+    kind: TokKind
+    text: String
+    line: Int
+}
+
+struct LexResult {
+    tokens: [Token] = []
+    error: String = ""
+    errorLine: Int = 0
+}
+
+fn pythonKeywords() -> [String] {
+    ["False", "None", "True", "and", "as", "assert", "break", "class", "continue", "def", "del", "elif", "else",
+     "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or",
+     "pass", "raise", "return", "try", "while", "with", "yield"]
+}
+
+fn isDigitChar(_ c: String) -> Bool {
+    c >= "0" && c <= "9" && c.count == 1
+}
+
+fn isHexChar(_ c: String) -> Bool {
+    isDigitChar(c) || (c >= "a" && c <= "f") || (c >= "A" && c <= "F")
+}
+
+// A letter, `_`, or any character outside ASCII (Python names can have those).
+fn isNameStart(_ c: String) -> Bool {
+    if c == "" {
+        return false
+    }
+    if (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || c == "_" {
+        return true
+    }
+    (Data(text: c).bytes.first ?? 0) >= 128
+}
+
+fn isNameChar(_ c: String) -> Bool {
+    isNameStart(c) || isDigitChar(c)
+}
+
+// The character with a code point, as text.
+fn chrOf(_ code: Int) -> String {
+    var bytes: [Int] = []
+    if code < 0x80 {
+        bytes = [code]
+    } else if code < 0x800 {
+        bytes = [0xC0 | (code >> 6), 0x80 | (code & 0x3F)]
+    } else if code < 0x10000 {
+        bytes = [0xE0 | (code >> 12), 0x80 | ((code >> 6) & 0x3F), 0x80 | (code & 0x3F)]
+    } else {
+        bytes = [0xF0 | (code >> 18), 0x80 | ((code >> 12) & 0x3F), 0x80 | ((code >> 6) & 0x3F), 0x80 | (code & 0x3F)]
+    }
+    Data(bytes: bytes).text ?? "?"
+}
+
+// The code point of a text's first character (-1 for no text).
+fn ordOf(_ text: String) -> Int {
+    let b = Data(text: text).bytes
+    if b.isEmpty {
+        return -1
+    }
+    let first = b[0]
+    if first < 0x80 {
+        return first
+    }
+    if first < 0xE0 && b.count >= 2 {
+        return ((first & 0x1F) << 6) | (b[1] & 0x3F)
+    }
+    if first < 0xF0 && b.count >= 3 {
+        return ((first & 0x0F) << 12) | ((b[1] & 0x3F) << 6) | (b[2] & 0x3F)
+    }
+    if b.count >= 4 {
+        return ((first & 0x07) << 18) | ((b[1] & 0x3F) << 12) | ((b[2] & 0x3F) << 6) | (b[3] & 0x3F)
+    }
+    first
+}
+
+fn hexValue(_ text: String) -> Int {
+    var n = 0
+    for c in text.lowercase().characters {
+        let d = "0123456789abcdef".find(c) ?? 0
+        n = n * 16 + d
+    }
+    n
+}
+
+// A string literal's text with its escapes (`\n`, `\x41`, …) carried out.
+fn unescape(_ raw: String) -> String {
+    if !raw.contains("\\") {
+        return raw
+    }
+    let c = raw.characters
+    var out = ""
+    var i = 0
+    while i < c.count {
+        if c[i] != "\\" || i + 1 >= c.count {
+            out += c[i]
+            i += 1
+            continue
+        }
+        let e = c[i + 1]
+        i += 2
+        match e {
+            "n" -> { out += "\n" }
+            "t" -> { out += "\t" }
+            "r" -> { out += "\r" }
+            "\\" -> { out += "\\" }
+            "'" -> { out += "'" }
+            "\"" -> { out += "\"" }
+            "0" -> { out += chrOf(0) }
+            "a" -> { out += chrOf(7) }
+            "b" -> { out += chrOf(8) }
+            "f" -> { out += chrOf(12) }
+            "v" -> { out += chrOf(11) }
+            "\n" -> { out += "" }
+            "x", "u", "U" -> {
+                let want = if e == "x" { 2 } else if e == "u" { 4 } else { 8 }
+                var hex = ""
+                while hex.count < want && i < c.count && isHexChar(c[i]) {
+                    hex += c[i]
+                    i += 1
+                }
+                if hex.count == want {
+                    out += chrOf(hexValue(hex))
+                } else {
+                    out += "\\" + e + hex
+                }
+            }
+            _ -> { out += "\\" + e }
+        }
+    }
+    out
+}
+
+struct Lexer {
+    c: [String]
+    pos: Int = 0
+    line: Int = 1
+    depth: Int = 0
+    indents: [Int] = [0]
+    // The brackets that are open: each one, and the line it's on.
+    open: [String] = []
+    openLines: [Int] = []
+    tokens: [Token] = []
+    error: String = ""
+    errorLine: Int = 0
+    keywords: Set<String> = []
+
+    fn peek(_ ahead: Int) -> String {
+        if pos + ahead < c.count { c[pos + ahead] } else { "" }
+    }
+
+    fn push(_ kind: TokKind, _ text: String) {
+        tokens.append(Token(kind: kind, text: text, line: line))
+    }
+
+    fn fail(_ message: String) {
+        if error == "" {
+            error = message
+            errorLine = line
+        }
+    }
+
+    // The indentation at the start of a line: blocks open and close here.
+    // Returns false at the end of the text.
+    fn lineStart() -> Bool {
+        while true {
+            var width = 0
+            while pos < c.count && (c[pos] == " " || c[pos] == "\t") {
+                if c[pos] == "\t" {
+                    width = (width / 8 + 1) * 8
+                } else if c[pos] == " " {
+                    width += 1
+                }
+                pos += 1
+            }
+            if pos >= c.count {
+                return false
+            }
+            // Blank lines and lines with only a comment don't count.
+            if c[pos] == "\n" {
+                pos += 1
+                line += 1
+                continue
+            }
+            if c[pos] == "\r" {
+                pos += 1
+                continue
+            }
+            if c[pos] == "#" {
+                while pos < c.count && c[pos] != "\n" {
+                    pos += 1
+                }
+                continue
+            }
+            let current = indents.last ?? 0
+            if width > current {
+                indents.append(width)
+                push(.indent, "")
+            } else if width < current {
+                while width < (indents.last ?? 0) {
+                    indents.removeLast()
+                    push(.dedent, "")
+                }
+                if width != (indents.last ?? 0) {
+                    fail("unindent does not match any outer indentation level")
+                }
+            }
+            return true
+        }
+        false
+    }
+
+    fn number() {
+        var text = ""
+        let first = peek(0)
+        let second = peek(1).lowercase()
+        if first == "0" && (second == "x" || second == "o" || second == "b") {
+            pos += 2
+            var digits = ""
+            while isHexChar(peek(0)) || peek(0) == "_" {
+                if peek(0) != "_" {
+                    digits += peek(0)
+                }
+                pos += 1
+            }
+            let base = if second == "x" { 16 } else if second == "o" { 8 } else { 2 }
+            var n = 0
+            for d in digits.lowercase().characters {
+                let v = "0123456789abcdef".find(d) ?? 0
+                if v >= base {
+                    fail("invalid digit '{d}' in a number")
+                }
+                n = n.wrappingMultiply(base).wrappingAdd(v)
+            }
+            if digits == "" {
+                fail("invalid number")
+            }
+            push(.int, "{n}")
+            return
+        }
+        var isFloat = false
+        while isDigitChar(peek(0)) || peek(0) == "_" {
+            if peek(0) != "_" {
+                text += peek(0)
+            }
+            pos += 1
+        }
+        if peek(0) == "." && peek(1) != "." {
+            isFloat = true
+            text += "."
+            pos += 1
+            while isDigitChar(peek(0)) || peek(0) == "_" {
+                if peek(0) != "_" {
+                    text += peek(0)
+                }
+                pos += 1
+            }
+        }
+        let e = peek(0)
+        if e == "e" || e == "E" {
+            let sign = peek(1)
+            if isDigitChar(sign) || ((sign == "+" || sign == "-") && isDigitChar(peek(2))) {
+                isFloat = true
+                text += "e"
+                pos += 1
+                if sign == "+" || sign == "-" {
+                    text += sign
+                    pos += 1
+                }
+                while isDigitChar(peek(0)) {
+                    text += peek(0)
+                    pos += 1
+                }
+            }
+        }
+        if isFloat {
+            // (Tessel reads `5.` and `.5` once they have a digit on both sides.)
+            if text.hasPrefix(".") {
+                text = "0" + text
+            }
+            text = text.replace(".e", with: ".0e")
+            if text.hasSuffix(".") {
+                text += "0"
+            }
+            push(.float, text)
+        } else {
+            push(.int, text)
+        }
+    }
+
+    // A string literal, after its prefix letters: `quote` is ' or ".
+    fn string(_ prefix: String) {
+        let quote = peek(0)
+        let raw = prefix.contains("r")
+        let formatted = prefix.contains("f")
+        let startLine = line
+        var triple = false
+        if peek(1) == quote && peek(2) == quote {
+            triple = true
+            pos += 3
+        } else {
+            pos += 1
+        }
+        var text = ""
+        var closed = false
+        while pos < c.count {
+            let ch = c[pos]
+            if ch == "\\" && pos + 1 < c.count {
+                // Kept as written here; `unescape` carries escapes out below.
+                text += ch
+                text += c[pos + 1]
+                if c[pos + 1] == "\n" {
+                    line += 1
+                }
+                pos += 2
+                continue
+            }
+            if ch == quote {
+                if !triple {
+                    pos += 1
+                    closed = true
+                    break
+                }
+                if peek(1) == quote && peek(2) == quote {
+                    pos += 3
+                    closed = true
+                    break
+                }
+            }
+            if ch == "\n" {
+                if !triple {
+                    break
+                }
+                line += 1
+            }
+            text += ch
+            pos += 1
+        }
+        if !closed {
+            let at = line
+            line = startLine
+            fail(if triple { "unterminated triple-quoted string literal" } else { "unterminated string literal" })
+            line = at
+            return
+        }
+        let at = line
+        line = startLine
+        if formatted {
+            // (Its parts are taken apart by the parser, which knows expressions.)
+            push(.fstr, if raw { "r" + text } else { "n" + text })
+        } else {
+            push(.str, if raw { text } else { unescape(text) })
+        }
+        line = at
+    }
+
+    fn operator() {
+        let three = peek(0) + peek(1) + peek(2)
+        let two = peek(0) + peek(1)
+        let one = peek(0)
+        if ["**=", "//=", ">>=", "<<=", "..."].contains(three) {
+            pos += 3
+            push(.op, three)
+            return
+        }
+        if ["**", "//", "==", "!=", "<=", ">=", "+=", "-=", "*=", "/=", "%=", "->", "<<", ">>", "&=", "|=", "^=", ":=", "@="].contains(two) {
+            pos += 2
+            push(.op, two)
+            return
+        }
+        if "+-*/%()[]\{\},:.;=<>&|^~@".contains(one) {
+            pos += 1
+            if one == "(" || one == "[" || one == "\{" {
+                depth += 1
+                open.append(one)
+                openLines.append(line)
+            } else if (one == ")" || one == "]" || one == "\}") && depth > 0 {
+                depth -= 1
+                open.removeLast()
+                openLines.removeLast()
+            }
+            push(.op, one)
+            return
+        }
+        fail("invalid character '{one}'")
+        pos += 1
+    }
+
+    fn run() {
+        for k in pythonKeywords() {
+            keywords.insert(k)
+        }
+        var more = lineStart()
+        while more && error == "" {
+            let ch = peek(0)
+            if ch == "" {
+                break
+            }
+            if ch == " " || ch == "\t" || ch == "\r" {
+                pos += 1
+                continue
+            }
+            if ch == "#" {
+                while pos < c.count && c[pos] != "\n" {
+                    pos += 1
+                }
+                continue
+            }
+            if ch == "\\" && (peek(1) == "\n" || (peek(1) == "\r" && peek(2) == "\n")) {
+                // A line that goes on.
+                pos += if peek(1) == "\n" { 2 } else { 3 }
+                line += 1
+                continue
+            }
+            if ch == "\n" {
+                pos += 1
+                if depth > 0 {
+                    line += 1
+                    continue
+                }
+                push(.newline, "")
+                line += 1
+                more = lineStart()
+                continue
+            }
+            if isDigitChar(ch) || (ch == "." && isDigitChar(peek(1))) {
+                number()
+                continue
+            }
+            if isNameStart(ch) {
+                var word = ""
+                while isNameChar(peek(0)) {
+                    word += peek(0)
+                    pos += 1
+                }
+                let next = peek(0)
+                let lower = word.lowercase()
+                if (next == "'" || next == "\"") && ["r", "f", "b", "u", "rf", "fr", "rb", "br"].contains(lower) {
+                    string(lower)
+                } else if keywords.contains(word) {
+                    push(.keyword, word)
+                } else {
+                    push(.name, word)
+                }
+                continue
+            }
+            if ch == "'" || ch == "\"" {
+                string("")
+                continue
+            }
+            operator()
+        }
+        if depth > 0 && error == "" {
+            error = "'{open.last ?? "("}' was never closed"
+            errorLine = openLines.last ?? line
+        }
+        if let last = tokens.last {
+            if last.kind != .newline {
+                push(.newline, "")
+            }
+        }
+        while indents.count > 1 {
+            indents.removeLast()
+            push(.dedent, "")
+        }
+        push(.eof, "")
+    }
+}
+
+fn tokenize(_ source: String) -> LexResult {
+    var lexer = Lexer(c: source.characters)
+    lexer.run()
+    LexResult(tokens: lexer.tokens, error: lexer.error, errorLine: lexer.errorLine)
+}

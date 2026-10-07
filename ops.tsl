@@ -1,0 +1,2017 @@
+// What Python's values do: their types' names, truth, text, equality and
+// order, arithmetic, attributes, indexing and iteration.
+
+fn intOf(_ v: Value) -> Int? {
+    match v {
+        .int(i) -> { return i }
+        .bool(b) -> { return if b { 1 } else { 0 } }
+        _ -> { return nil }
+    }
+}
+
+fn floatOf(_ v: Value) -> Float? {
+    match v {
+        .float(f) -> { return f }
+        .int(i) -> { return Float(i) }
+        .bool(b) -> { return if b { 1.0 } else { 0.0 } }
+        _ -> { return nil }
+    }
+}
+
+fn isFloatValue(_ v: Value) -> Bool {
+    match v {
+        .float(_) -> true
+        _ -> false
+    }
+}
+
+fn minInt() -> Int {
+    -9223372036854775807 - 1
+}
+
+// a * b, or nil if it doesn't fit in 64 bits.
+fn mulChecked(_ a: Int, _ b: Int) -> Int? {
+    if a == 0 || b == 0 {
+        return 0
+    }
+    if (a == -1 && b == minInt()) || (b == -1 && a == minInt()) {
+        return nil
+    }
+    let r = a.wrappingMultiply(b)
+    if r / b != a {
+        return nil
+    }
+    r
+}
+
+// The names of the built-in types (which are also functions: `int("5")`).
+fn isTypeName(_ name: String) -> Bool {
+    match name {
+        "int", "float", "str", "bool", "list", "tuple", "dict", "set", "range", "object", "type", "bytes", "frozenset" -> true
+        _ -> false
+    }
+}
+
+fn typeName(_ it: bind Interp, _ v: Value) -> String {
+    match v {
+        .none -> "NoneType"
+        .bool(_) -> "bool"
+        .int(_) -> "int"
+        .float(_) -> "float"
+        .str(_) -> "str"
+        .list(_) -> "list"
+        .tuple(_) -> "tuple"
+        .dict(_) -> "dict"
+        .set(_) -> "set"
+        .function(_) -> "function"
+        .builtin(name) -> if isTypeName(name) { "type" } else { "builtin_function_or_method" }
+        .bound(_) -> "method"
+        .klass(_) -> "type"
+        .instance(id) -> it.classes[it.instances[id].cls].name
+        .range(_, _, _) -> "range"
+        .module(_) -> "module"
+        .iterator(id) -> it.iterators[id].kind
+        .file(_) -> "TextIOWrapper"
+        .wrapper(kind, _) -> if kind == 0 { "staticmethod" } else if kind == 1 { "classmethod" } else { "property" }
+        .superRef(_, _) -> "super"
+        .absent -> "?"
+    }
+}
+
+// ---- classes ----
+
+// An attribute from a class or the classes it inherits from (`.absent` if
+// none has it).
+fn classAttr(_ it: bind Interp, _ cls: Int, _ name: String) -> Value {
+    for c in it.classes[cls].mro {
+        if let v = it.classes[c].attrs[name] {
+            return v
+        }
+    }
+    Value.absent
+}
+
+fn isSubclass(_ it: bind Interp, _ cls: Int, _ of: Int) -> Bool {
+    cls == of || it.classes[cls].mro.contains(of)
+}
+
+fn isException(_ it: bind Interp, _ v: Value) -> Bool {
+    match v {
+        .instance(id) -> isSubclass(it, it.instances[id].cls, it.classIds["BaseException"] ?? -1)
+        _ -> false
+    }
+}
+
+// Whether a raised exception is one an `except` clause names.
+fn exceptionMatches(_ it: bind Interp, _ raised: Value, _ wanted: Value) -> Bool {
+    match wanted {
+        .klass(cls) -> {
+            match raised {
+                .instance(id) -> isSubclass(it, it.instances[id].cls, cls)
+                _ -> false
+            }
+        }
+        .tuple(id) -> {
+            for w in it.lists[id] {
+                if exceptionMatches(it, raised, w) {
+                    return true
+                }
+            }
+            false
+        }
+        _ -> {
+            it.throw("TypeError", "catching classes that do not inherit from BaseException is not allowed")
+            false
+        }
+    }
+}
+
+fn makeClass(_ it: bind Interp, _ name: String, _ bases: [Int], _ attrs: [String: Value]) -> Int {
+    let id = it.classes.count
+    // The class, then its bases' orders one after the other, each class
+    // kept where it comes last (so a shared base comes after all its heirs).
+    var order = [id]
+    for b in bases {
+        order.appendAll(it.classes[b].mro)
+    }
+    var mro: [Int] = []
+    for i in order.indices {
+        var later = false
+        for j in (i + 1)..order.count {
+            if order[j] == order[i] {
+                later = true
+                break
+            }
+        }
+        if !later {
+            mro.append(order[i])
+        }
+    }
+    it.classes.append(Klass(name: name, bases: bases, mro: mro, attrs: attrs))
+    // Its functions are its methods: `super()` in them starts from here.
+    for (_, v) in attrs {
+        var f = v
+        match v {
+            .wrapper(_, cell) -> { f = it.cells[cell] }
+            _ -> {}
+        }
+        match f {
+            .function(fid) -> {
+                if it.closures[fid].owner < 0 {
+                    it.closures[fid].owner = id
+                }
+            }
+            _ -> {}
+        }
+    }
+    id
+}
+
+// A new object of a class: `Point(1, 2)`.
+fn instantiate(_ it: bind Interp, _ cls: Int, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
+    it.instances.append(Instance(cls: cls))
+    let id = it.instances.count - 1
+    let object = Value.instance(id: id)
+    if isSubclass(it, cls, it.classIds["BaseException"] ?? -1) {
+        it.instances[id].fields["args"] = it.newTuple(args)
+    }
+    let initializer = classAttr(it, cls, "__init__")
+    match initializer {
+        .function(fid) -> {
+            var all = [object]
+            all.appendAll(args)
+            it.callClosure(fid, all, kwNames, kwValues)
+            if it.signal != .none {
+                return Value.none
+            }
+        }
+        _ -> {
+            if (!args.isEmpty || !kwNames.isEmpty) && it.instances[id].fields.isEmpty {
+                return it.throw("TypeError", "{it.classes[cls].name}() takes no arguments")
+            }
+        }
+    }
+    object
+}
+
+// What looking an attribute up through an object gives, for what its class
+// has: a function becomes a method of the object, a property its value.
+fn bindAttr(_ it: bind Interp, _ found: Value, _ receiver: Value, _ cls: Int) -> Value {
+    match found {
+        .function(_) -> it.newBound(receiver, found)
+        .wrapper(kind, cell) -> {
+            if kind == 0 {
+                it.cells[cell]
+            } else if kind == 1 {
+                it.newBound(.klass(id: cls), it.cells[cell])
+            } else {
+                it.callValue(it.cells[cell], [receiver], [], [])
+            }
+        }
+        _ -> found
+    }
+}
+
+// ---- truth and text ----
+
+fn truthy(_ it: bind Interp, _ v: Value) -> Bool {
+    match v {
+        .bool(b) -> b
+        .none -> false
+        .int(i) -> i != 0
+        .float(f) -> f != 0.0
+        .str(s) -> s != ""
+        .list(id) -> !it.lists[id].isEmpty
+        .tuple(id) -> !it.lists[id].isEmpty
+        .dict(id) -> it.dicts[id].live > 0
+        .set(id) -> it.dicts[id].live > 0
+        .range(start, stop, step) -> (step > 0 && start < stop) || (step < 0 && start > stop)
+        .instance(id) -> {
+            let cls = it.instances[id].cls
+            let asBool = classAttr(it, cls, "__bool__")
+            if asBool != Value.absent {
+                let r = it.callValue(asBool, [v], [], [])
+                return r == Value.bool(b: true)
+            }
+            let length = classAttr(it, cls, "__len__")
+            if length != Value.absent {
+                let r = it.callValue(length, [v], [], [])
+                return r != Value.int(i: 0)
+            }
+            true
+        }
+        _ -> true
+    }
+}
+
+// What an exception says: its message.
+fn exceptionText(_ it: bind Interp, _ id: Int) -> String {
+    var args: [Value] = []
+    match it.instances[id].fields["args"] ?? Value.none {
+        .tuple(t) -> { args = it.lists[t] }
+        _ -> {}
+    }
+    if args.isEmpty {
+        return ""
+    }
+    if args.count == 1 {
+        // (A KeyError shows the key as it's written.)
+        if it.instances[id].cls == (it.classIds["KeyError"] ?? -1) {
+            return toRepr(it, args[0])
+        }
+        return toStr(it, args[0])
+    }
+    toRepr(it, it.instances[id].fields["args"] ?? Value.none)
+}
+
+// str(v).
+fn toStr(_ it: bind Interp, _ v: Value) -> String {
+    match v {
+        .str(s) -> s
+        .instance(id) -> {
+            let cls = it.instances[id].cls
+            let method = classAttr(it, cls, "__str__")
+            if method != Value.absent {
+                let r = it.callValue(method, [v], [], [])
+                match r {
+                    .str(s) -> { return s }
+                    _ -> {
+                        if it.signal == .none {
+                            it.throw("TypeError", "__str__ returned non-string (type {typeName(it, r)})")
+                        }
+                        return ""
+                    }
+                }
+            }
+            if isException(it, v) && classAttr(it, cls, "__repr__") == Value.absent {
+                return exceptionText(it, id)
+            }
+            toRepr(it, v)
+        }
+        _ -> toRepr(it, v)
+    }
+}
+
+fn joinReprs(_ it: bind Interp, _ items: [Value]) -> String {
+    var parts: [String] = []
+    for item in items {
+        parts.append(toRepr(it, item))
+    }
+    parts.joined(separator: ", ")
+}
+
+// repr(v): the value as it's written in code, where it can be.
+fn toRepr(_ it: bind Interp, _ v: Value) -> String {
+    match v {
+        .none -> "None"
+        .bool(b) -> if b { "True" } else { "False" }
+        .int(i) -> "{i}"
+        .float(f) -> floatRepr(f)
+        .str(s) -> strRepr(s)
+        .list(id) -> "[" + joinReprs(it, it.lists[id]) + "]"
+        .tuple(id) -> {
+            let items = it.lists[id]
+            if items.count == 1 {
+                "(" + toRepr(it, items[0]) + ",)"
+            } else {
+                "(" + joinReprs(it, items) + ")"
+            }
+        }
+        .dict(id) -> {
+            let keys = dictKeys(it.dicts[id])
+            let values = dictValues(it.dicts[id])
+            var parts: [String] = []
+            for i in keys.indices {
+                parts.append(toRepr(it, keys[i]) + ": " + toRepr(it, values[i]))
+            }
+            "\{" + parts.joined(separator: ", ") + "\}"
+        }
+        .set(id) -> {
+            if it.dicts[id].live == 0 {
+                "set()"
+            } else {
+                "\{" + joinReprs(it, dictKeys(it.dicts[id])) + "\}"
+            }
+        }
+        .function(id) -> "<function {it.closures[id].name}>"
+        .builtin(name) -> {
+            if isTypeName(name) || ["NoneType", "function", "module", "method", "builtin_function_or_method", "generator",
+                                    "TextIOWrapper", "staticmethod", "classmethod", "property", "super"].contains(name) {
+                "<class '{name}'>"
+            } else if name.hasPrefix("@") {
+                "<built-in method {name.substring(from: 1, to: name.count)}>"
+            } else {
+                "<built-in function {name}>"
+            }
+        }
+        .bound(id) -> {
+            let b = it.bounds[id]
+            match b.method {
+                .function(fid) -> "<bound method {it.closures[fid].name}>"
+                _ -> toRepr(it, b.method)
+            }
+        }
+        .klass(id) -> {
+            if it.classIds[it.classes[id].name] == id {
+                "<class '{it.classes[id].name}'>"
+            } else {
+                "<class '__main__.{it.classes[id].name}'>"
+            }
+        }
+        .instance(id) -> {
+            let cls = it.instances[id].cls
+            let method = classAttr(it, cls, "__repr__")
+            if method != Value.absent {
+                let r = it.callValue(method, [v], [], [])
+                match r {
+                    .str(s) -> { return s }
+                    _ -> {
+                        if it.signal == .none {
+                            it.throw("TypeError", "__repr__ returned non-string (type {typeName(it, r)})")
+                        }
+                        return ""
+                    }
+                }
+            }
+            if isException(it, v) {
+                var args: [Value] = []
+                match it.instances[id].fields["args"] ?? Value.none {
+                    .tuple(t) -> { args = it.lists[t] }
+                    _ -> {}
+                }
+                return it.classes[cls].name + "(" + joinReprs(it, args) + ")"
+            }
+            "<__main__.{it.classes[cls].name} object>"
+        }
+        .range(start, stop, step) -> {
+            if step == 1 {
+                "range({start}, {stop})"
+            } else {
+                "range({start}, {stop}, {step})"
+            }
+        }
+        .module(name) -> "<module '{name}'>"
+        .iterator(id) -> "<{it.iterators[id].kind} object>"
+        .file(id) -> "<_io.TextIOWrapper name={strRepr(it.files[id].path)} mode={strRepr(it.files[id].mode)}>"
+        .wrapper(kind, _) -> if kind == 0 { "<staticmethod object>" } else if kind == 1 { "<classmethod object>" } else { "<property object>" }
+        .superRef(_, _) -> "<super object>"
+        .absent -> "<absent>"
+    }
+}
+
+// ---- equality, order, membership ----
+
+fn pyEquals(_ it: bind Interp, _ a: Value, _ b: Value) -> Bool {
+    match a {
+        .int(x) -> {
+            match b {
+                .int(y) -> x == y
+                .float(y) -> Float(x) == y
+                .bool(y) -> x == (if y { 1 } else { 0 })
+                _ -> reflectedEquals(it, a, b)
+            }
+        }
+        .str(x) -> {
+            match b {
+                .str(y) -> x == y
+                _ -> reflectedEquals(it, a, b)
+            }
+        }
+        .float(x) -> {
+            if let y = floatOf(b) {
+                x == y
+            } else {
+                reflectedEquals(it, a, b)
+            }
+        }
+        .bool(x) -> {
+            if let y = floatOf(b) {
+                (if x { 1.0 } else { 0.0 }) == y
+            } else {
+                reflectedEquals(it, a, b)
+            }
+        }
+        .none -> b == Value.none
+        .list(x) -> {
+            match b {
+                .list(y) -> x == y || listsEqual(it, it.lists[x], it.lists[y])
+                _ -> reflectedEquals(it, a, b)
+            }
+        }
+        .tuple(x) -> {
+            match b {
+                .tuple(y) -> x == y || listsEqual(it, it.lists[x], it.lists[y])
+                _ -> reflectedEquals(it, a, b)
+            }
+        }
+        .dict(x) -> {
+            match b {
+                .dict(y) -> x == y || dictsEqual(it, x, y, true)
+                _ -> reflectedEquals(it, a, b)
+            }
+        }
+        .set(x) -> {
+            match b {
+                .set(y) -> x == y || dictsEqual(it, x, y, false)
+                _ -> reflectedEquals(it, a, b)
+            }
+        }
+        .instance(id) -> {
+            let method = classAttr(it, it.instances[id].cls, "__eq__")
+            if method != Value.absent {
+                let r = it.callValue(method, [a, b], [], [])
+                if it.signal != .none {
+                    return false
+                }
+                return truthy(it, r)
+            }
+            a == b
+        }
+        _ -> a == b
+    }
+}
+
+// a == b where `a` doesn't know `b`'s type: an object on the right may.
+fn reflectedEquals(_ it: bind Interp, _ a: Value, _ b: Value) -> Bool {
+    match b {
+        .instance(id) -> {
+            let method = classAttr(it, it.instances[id].cls, "__eq__")
+            if method != Value.absent {
+                let r = it.callValue(method, [b, a], [], [])
+                if it.signal != .none {
+                    return false
+                }
+                return truthy(it, r)
+            }
+            false
+        }
+        _ -> false
+    }
+}
+
+fn listsEqual(_ it: bind Interp, _ a: [Value], _ b: [Value]) -> Bool {
+    if a.count != b.count {
+        return false
+    }
+    for i in a.indices {
+        if !pyEquals(it, a[i], b[i]) {
+            return false
+        }
+    }
+    true
+}
+
+fn dictsEqual(_ it: bind Interp, _ x: Int, _ y: Int, _ withValues: Bool) -> Bool {
+    if it.dicts[x].live != it.dicts[y].live {
+        return false
+    }
+    for (hash, at) in it.dicts[x].index {
+        if let other = it.dicts[y].index[hash] {
+            if withValues && !pyEquals(it, it.dicts[x].vals[at], it.dicts[y].vals[other]) {
+                return false
+            }
+        } else {
+            return false
+        }
+    }
+    true
+}
+
+fn orderError(_ it: bind Interp, _ symbol: String, _ a: Value, _ b: Value) -> Bool {
+    it.throw("TypeError", "'{symbol}' not supported between instances of '{typeName(it, a)}' and '{typeName(it, b)}'")
+    false
+}
+
+// a < b. `symbol` is the operator the program wrote, for the message when
+// the two can't be ordered.
+fn pyLess(_ it: bind Interp, _ a: Value, _ b: Value, _ symbol: String) -> Bool {
+    match a {
+        .int(x) -> {
+            match b {
+                .int(y) -> { return x < y }
+                _ -> {}
+            }
+        }
+        .str(x) -> {
+            match b {
+                .str(y) -> { return x < y }
+                _ -> { return orderError(it, symbol, a, b) }
+            }
+        }
+        _ -> {}
+    }
+    if let x = floatOf(a) {
+        if let y = floatOf(b) {
+            return x < y
+        }
+    }
+    match a {
+        .list(x) -> {
+            match b {
+                .list(y) -> { return sequenceLess(it, it.lists[x], it.lists[y], symbol) }
+                _ -> {}
+            }
+        }
+        .tuple(x) -> {
+            match b {
+                .tuple(y) -> { return sequenceLess(it, it.lists[x], it.lists[y], symbol) }
+                _ -> {}
+            }
+        }
+        .set(x) -> {
+            match b {
+                // (A set is "less" when it's a part of the other.)
+                .set(y) -> { return it.dicts[x].live < it.dicts[y].live && isSubset(it, x, y) }
+                _ -> {}
+            }
+        }
+        .instance(id) -> {
+            let method = classAttr(it, it.instances[id].cls, "__lt__")
+            if method != Value.absent {
+                let r = it.callValue(method, [a, b], [], [])
+                if it.signal != .none {
+                    return false
+                }
+                return truthy(it, r)
+            }
+        }
+        _ -> {}
+    }
+    match b {
+        .instance(id) -> {
+            let method = classAttr(it, it.instances[id].cls, "__gt__")
+            if method != Value.absent {
+                let r = it.callValue(method, [b, a], [], [])
+                if it.signal != .none {
+                    return false
+                }
+                return truthy(it, r)
+            }
+        }
+        _ -> {}
+    }
+    orderError(it, symbol, a, b)
+}
+
+fn sequenceLess(_ it: bind Interp, _ a: [Value], _ b: [Value], _ symbol: String) -> Bool {
+    let shared = if a.count < b.count { a.count } else { b.count }
+    for i in 0..shared {
+        if !pyEquals(it, a[i], b[i]) {
+            return pyLess(it, a[i], b[i], symbol)
+        }
+        if it.signal != .none {
+            return false
+        }
+    }
+    a.count < b.count
+}
+
+fn isSubset(_ it: bind Interp, _ x: Int, _ y: Int) -> Bool {
+    for (hash, _) in it.dicts[x].index {
+        if !it.dicts[y].index.contains(key: hash) {
+            return false
+        }
+    }
+    true
+}
+
+// An object's own comparison method (`__le__`, …), if its class has one:
+// 1 for true, 0 for false, -1 if there's none.
+fn richCompare(_ it: bind Interp, _ a: Value, _ b: Value, _ method: String) -> Int {
+    match a {
+        .instance(id) -> {
+            let found = classAttr(it, it.instances[id].cls, method)
+            if found == Value.absent {
+                return -1
+            }
+            let r = it.callValue(found, [a, b], [], [])
+            if it.signal != .none {
+                return 0
+            }
+            if truthy(it, r) { 1 } else { 0 }
+        }
+        _ -> -1
+    }
+}
+
+fn compareOp(_ it: bind Interp, _ op: CmpOp, _ a: Value, _ b: Value) -> Bool {
+    match op {
+        .eq -> pyEquals(it, a, b)
+        .ne -> {
+            let own = richCompare(it, a, b, "__ne__")
+            if own >= 0 {
+                own == 1
+            } else {
+                !pyEquals(it, a, b)
+            }
+        }
+        .lt -> pyLess(it, a, b, "<")
+        .gt -> {
+            let own = richCompare(it, a, b, "__gt__")
+            if own >= 0 {
+                own == 1
+            } else {
+                pyLess(it, b, a, ">")
+            }
+        }
+        .le -> {
+            let own = richCompare(it, a, b, "__le__")
+            if own >= 0 {
+                return own == 1
+            }
+            if pyLess(it, a, b, "<=") {
+                return true
+            }
+            if it.signal != .none {
+                return false
+            }
+            pyEquals(it, a, b)
+        }
+        .ge -> {
+            let own = richCompare(it, a, b, "__ge__")
+            if own >= 0 {
+                return own == 1
+            }
+            if pyLess(it, b, a, ">=") {
+                return true
+            }
+            if it.signal != .none {
+                return false
+            }
+            pyEquals(it, a, b)
+        }
+        .isOp -> a == b
+        .isNot -> a != b
+        .inOp -> contains(it, b, a)
+        .notIn -> {
+            let inside = contains(it, b, a)
+            !inside
+        }
+    }
+}
+
+// item in container.
+fn contains(_ it: bind Interp, _ container: Value, _ item: Value) -> Bool {
+    match container {
+        .str(s) -> {
+            match item {
+                .str(part) -> s.contains(part)
+                _ -> {
+                    it.throw("TypeError", "'in <string>' requires string as left operand, not {typeName(it, item)}")
+                    false
+                }
+            }
+        }
+        .list(id) -> listContains(it, it.lists[id], item)
+        .tuple(id) -> listContains(it, it.lists[id], item)
+        .dict(id) -> {
+            let h = hashKey(it, item)
+            if it.signal != .none {
+                return false
+            }
+            it.dicts[id].index.contains(key: h)
+        }
+        .set(id) -> {
+            let h = hashKey(it, item)
+            if it.signal != .none {
+                return false
+            }
+            it.dicts[id].index.contains(key: h)
+        }
+        .range(start, stop, step) -> {
+            if let i = intOf(item) {
+                if step > 0 {
+                    i >= start && i < stop && (i - start) % step == 0
+                } else {
+                    i <= start && i > stop && (start - i) % (-step) == 0
+                }
+            } else {
+                false
+            }
+        }
+        .instance(id) -> {
+            let method = classAttr(it, it.instances[id].cls, "__contains__")
+            if method != Value.absent {
+                let r = it.callValue(method, [container, item], [], [])
+                if it.signal != .none {
+                    return false
+                }
+                return truthy(it, r)
+            }
+            let items = iterate(it, container)
+            if it.signal != .none {
+                return false
+            }
+            listContains(it, items, item)
+        }
+        _ -> {
+            let items = iterate(it, container)
+            if it.signal != .none {
+                it.signal = .none
+                it.throw("TypeError", "argument of type '{typeName(it, container)}' is not iterable")
+                return false
+            }
+            listContains(it, items, item)
+        }
+    }
+}
+
+fn listContains(_ it: bind Interp, _ items: [Value], _ item: Value) -> Bool {
+    for x in items {
+        if pyEquals(it, x, item) {
+            return true
+        }
+        if it.signal != .none {
+            return false
+        }
+    }
+    false
+}
+
+// A value as a dictionary key, written as text: values that are equal in
+// Python (1, 1.0 and True) get the same text. Values that can't be keys
+// raise a TypeError (and give "").
+fn hashKey(_ it: bind Interp, _ v: Value) -> String {
+    match v {
+        .str(s) -> "s" + s
+        .int(i) -> "i{i}"
+        .bool(b) -> if b { "i1" } else { "i0" }
+        .float(f) -> {
+            if f == floor(f) && f > -9.0e15 && f < 9.0e15 {
+                "i{Int(f)}"
+            } else {
+                "f" + floatRepr(f)
+            }
+        }
+        .none -> "n"
+        .tuple(id) -> {
+            var out = "t"
+            for item in it.lists[id] {
+                let k = hashKey(it, item)
+                if it.signal != .none {
+                    return ""
+                }
+                out += "{k.count}:" + k
+            }
+            out
+        }
+        .instance(id) -> {
+            let method = classAttr(it, it.instances[id].cls, "__hash__")
+            if method != Value.absent {
+                let r = it.callValue(method, [v], [], [])
+                if it.signal != .none {
+                    return ""
+                }
+                return "h" + toRepr(it, r)
+            }
+            "o{id}"
+        }
+        .function(id) -> "F{id}"
+        .klass(id) -> "c{id}"
+        .builtin(name) -> "b" + name
+        .range(start, stop, step) -> "r{start},{stop},{step}"
+        .bound(id) -> "m{id}"
+        .module(name) -> "M" + name
+        _ -> {
+            it.throw("TypeError", "unhashable type: '{typeName(it, v)}'")
+            ""
+        }
+    }
+}
+
+fn makeSet(_ it: bind Interp, _ items: [Value]) -> Value {
+    let id = it.newDict()
+    for item in items {
+        let h = hashKey(it, item)
+        if it.signal != .none {
+            return Value.none
+        }
+        dictSet(it.dicts[id], item, h, Value.none)
+    }
+    Value.set(id: id)
+}
+
+// d.update(other): another dictionary's entries, or pairs.
+fn dictUpdate(_ it: bind Interp, _ id: Int, _ other: Value) {
+    match other {
+        .dict(from) -> {
+            let keys = dictKeys(it.dicts[from])
+            let values = dictValues(it.dicts[from])
+            for i in keys.indices {
+                let h = hashKey(it, keys[i])
+                dictSet(it.dicts[id], keys[i], h, values[i])
+            }
+        }
+        _ -> {
+            let pairs = iterate(it, other)
+            if it.signal != .none {
+                return
+            }
+            for pair in pairs {
+                let both = iterate(it, pair)
+                if it.signal != .none {
+                    return
+                }
+                if both.count != 2 {
+                    it.throw("ValueError", "dictionary update sequence element has length {both.count}; 2 is required")
+                    return
+                }
+                let h = hashKey(it, both[0])
+                if it.signal != .none {
+                    return
+                }
+                dictSet(it.dicts[id], both[0], h, both[1])
+            }
+        }
+    }
+}
+
+// ---- arithmetic ----
+
+fn opSymbol(_ op: BinOp) -> String {
+    match op {
+        .add -> "+"
+        .sub -> "-"
+        .mul -> "*"
+        .div -> "/"
+        .floorDiv -> "//"
+        .mod -> "%"
+        .pow -> "** or pow()"
+        .lshift -> "<<"
+        .rshift -> ">>"
+        .bitAnd -> "&"
+        .bitOr -> "|"
+        .bitXor -> "^"
+    }
+}
+
+fn opMethod(_ op: BinOp) -> String {
+    match op {
+        .add -> "add"
+        .sub -> "sub"
+        .mul -> "mul"
+        .div -> "truediv"
+        .floorDiv -> "floordiv"
+        .mod -> "mod"
+        .pow -> "pow"
+        .lshift -> "lshift"
+        .rshift -> "rshift"
+        .bitAnd -> "and"
+        .bitOr -> "or"
+        .bitXor -> "xor"
+    }
+}
+
+fn tooLarge(_ it: bind Interp) -> Value {
+    it.throw("OverflowError", "integer result too large (Adder's integers are 64-bit)")
+}
+
+fn intOp(_ it: bind Interp, _ op: BinOp, _ x: Int, _ y: Int) -> Value {
+    match op {
+        .add -> {
+            let r = x.wrappingAdd(y)
+            if ((x ^ r) & (y ^ r)) < 0 {
+                return tooLarge(it)
+            }
+            Value.int(i: r)
+        }
+        .sub -> {
+            let r = x.wrappingSubtract(y)
+            if ((x ^ y) & (x ^ r)) < 0 {
+                return tooLarge(it)
+            }
+            Value.int(i: r)
+        }
+        .mul -> {
+            if let r = mulChecked(x, y) {
+                Value.int(i: r)
+            } else {
+                tooLarge(it)
+            }
+        }
+        .div -> {
+            if y == 0 {
+                return it.throw("ZeroDivisionError", "division by zero")
+            }
+            Value.float(f: Float(x) / Float(y))
+        }
+        .floorDiv -> {
+            if y == 0 {
+                return it.throw("ZeroDivisionError", "integer division or modulo by zero")
+            }
+            if y == -1 {
+                if x == minInt() {
+                    return tooLarge(it)
+                }
+                return .int(i: -x)
+            }
+            var q = x / y
+            if x % y != 0 && ((x < 0) != (y < 0)) {
+                q -= 1
+            }
+            Value.int(i: q)
+        }
+        .mod -> {
+            if y == 0 {
+                return it.throw("ZeroDivisionError", "integer division or modulo by zero")
+            }
+            if y == -1 {
+                return .int(i: 0)
+            }
+            var r = x % y
+            if r != 0 && ((r < 0) != (y < 0)) {
+                r += y
+            }
+            Value.int(i: r)
+        }
+        .pow -> {
+            if y < 0 {
+                if x == 0 {
+                    return it.throw("ZeroDivisionError", "0.0 cannot be raised to a negative power")
+                }
+                return .float(f: pow(Float(x), Float(y)))
+            }
+            var result = 1
+            var base = x
+            var e = y
+            while e > 0 {
+                if e % 2 == 1 {
+                    if let r = mulChecked(result, base) {
+                        result = r
+                    } else {
+                        return tooLarge(it)
+                    }
+                }
+                e = e / 2
+                if e > 0 {
+                    if let b = mulChecked(base, base) {
+                        base = b
+                    } else {
+                        return tooLarge(it)
+                    }
+                }
+            }
+            Value.int(i: result)
+        }
+        .lshift -> {
+            if y < 0 {
+                return it.throw("ValueError", "negative shift count")
+            }
+            if x == 0 {
+                return .int(i: 0)
+            }
+            if y >= 63 {
+                return tooLarge(it)
+            }
+            let r = x << y
+            if (r >> y) != x {
+                return tooLarge(it)
+            }
+            Value.int(i: r)
+        }
+        .rshift -> {
+            if y < 0 {
+                return it.throw("ValueError", "negative shift count")
+            }
+            if y >= 63 {
+                return .int(i: if x < 0 { -1 } else { 0 })
+            }
+            Value.int(i: x >> y)
+        }
+        .bitAnd -> .int(i: x & y)
+        .bitOr -> .int(i: x | y)
+        .bitXor -> .int(i: x ^ y)
+    }
+}
+
+fn floatOp(_ it: bind Interp, _ op: BinOp, _ x: Float, _ y: Float, _ a: Value, _ b: Value) -> Value {
+    match op {
+        .add -> .float(f: x + y)
+        .sub -> .float(f: x - y)
+        .mul -> .float(f: x * y)
+        .div -> {
+            if y == 0.0 {
+                return it.throw("ZeroDivisionError", "float division by zero")
+            }
+            Value.float(f: x / y)
+        }
+        .floorDiv -> {
+            if y == 0.0 {
+                return it.throw("ZeroDivisionError", "float floor division by zero")
+            }
+            Value.float(f: floor(x / y))
+        }
+        .mod -> {
+            if y == 0.0 {
+                return it.throw("ZeroDivisionError", "float modulo")
+            }
+            var r = x - y * floor(x / y)
+            // (Rounding can leave it just outside 0…y.)
+            if r != 0.0 && ((r < 0.0) != (y < 0.0)) {
+                r += y
+            }
+            Value.float(f: r)
+        }
+        .pow -> {
+            if x == 0.0 && y < 0.0 {
+                return it.throw("ZeroDivisionError", "0.0 cannot be raised to a negative power")
+            }
+            if x < 0.0 && y != floor(y) {
+                return it.throw("ValueError", "negative number cannot be raised to a fractional power")
+            }
+            Value.float(f: pow(x, y))
+        }
+        _ -> it.throw("TypeError", "unsupported operand type(s) for {opSymbol(op)}: '{typeName(it, a)}' and '{typeName(it, b)}'")
+    }
+}
+
+fn repeatList(_ items: [Value], _ times: Int) -> [Value] {
+    var out: [Value] = []
+    if times <= 0 {
+        return out
+    }
+    for _ in 0..times {
+        out.appendAll(items)
+    }
+    out
+}
+
+// Sets: | & - ^.
+fn setOp(_ it: bind Interp, _ op: BinOp, _ x: Int, _ y: Int) -> Value {
+    let id = it.newDict()
+    let xs = dictKeys(it.dicts[x])
+    let ys = dictKeys(it.dicts[y])
+    for k in xs {
+        let h = hashKey(it, k)
+        let inOther = it.dicts[y].index.contains(key: h)
+        let keep = match op {
+            .bitOr -> true
+            .bitAnd -> inOther
+            _ -> !inOther
+        }
+        if keep {
+            dictSet(it.dicts[id], k, h, Value.none)
+        }
+    }
+    if op == .bitOr || op == .bitXor {
+        for k in ys {
+            let h = hashKey(it, k)
+            if op == .bitOr || !it.dicts[x].index.contains(key: h) {
+                dictSet(it.dicts[id], k, h, Value.none)
+            }
+        }
+    }
+    Value.set(id: id)
+}
+
+fn binaryOp(_ it: bind Interp, _ op: BinOp, _ a: Value, _ b: Value) -> Value {
+    // Numbers.
+    if let x = intOf(a) {
+        if let y = intOf(b) {
+            return intOp(it, op, x, y)
+        }
+    }
+    if let x = floatOf(a) {
+        if let y = floatOf(b) {
+            return floatOp(it, op, x, y, a, b)
+        }
+    }
+    match a {
+        .str(x) -> {
+            match op {
+                .add -> {
+                    match b {
+                        .str(y) -> { return .str(s: x + y) }
+                        .instance(_) -> {}
+                        _ -> { return it.throw("TypeError", "can only concatenate str (not \"{typeName(it, b)}\") to str") }
+                    }
+                }
+                .mul -> {
+                    if let n = intOf(b) {
+                        return .str(s: if n > 0 { x.repeated(n) } else { "" })
+                    }
+                }
+                .mod -> { return .str(s: percentFormat(it, x, b)) }
+                _ -> {}
+            }
+        }
+        .list(x) -> {
+            match op {
+                .add -> {
+                    match b {
+                        .list(y) -> {
+                            var items = it.lists[x]
+                            items.appendAll(it.lists[y])
+                            return it.newList(items)
+                        }
+                        .instance(_) -> {}
+                        _ -> { return it.throw("TypeError", "can only concatenate list (not \"{typeName(it, b)}\") to list") }
+                    }
+                }
+                .mul -> {
+                    if let n = intOf(b) {
+                        return it.newList(repeatList(it.lists[x], n))
+                    }
+                }
+                _ -> {}
+            }
+        }
+        .tuple(x) -> {
+            match op {
+                .add -> {
+                    match b {
+                        .tuple(y) -> {
+                            var items = it.lists[x]
+                            items.appendAll(it.lists[y])
+                            return it.newTuple(items)
+                        }
+                        .instance(_) -> {}
+                        _ -> { return it.throw("TypeError", "can only concatenate tuple (not \"{typeName(it, b)}\") to tuple") }
+                    }
+                }
+                .mul -> {
+                    if let n = intOf(b) {
+                        return it.newTuple(repeatList(it.lists[x], n))
+                    }
+                }
+                _ -> {}
+            }
+        }
+        .set(x) -> {
+            match b {
+                .set(y) -> {
+                    if op == .bitOr || op == .bitAnd || op == .sub || op == .bitXor {
+                        return setOp(it, op, x, y)
+                    }
+                }
+                _ -> {}
+            }
+        }
+        .dict(x) -> {
+            match b {
+                .dict(_) -> {
+                    if op == .bitOr {
+                        let id = it.newDict()
+                        dictUpdate(it, id, a)
+                        dictUpdate(it, id, b)
+                        return .dict(id: id)
+                    }
+                }
+                _ -> {}
+            }
+        }
+        .instance(id) -> {
+            let method = classAttr(it, it.instances[id].cls, "__" + opMethod(op) + "__")
+            if method != Value.absent {
+                return it.callValue(method, [a, b], [], [])
+            }
+        }
+        _ -> {}
+    }
+    // n * "ab", n * [1], and an object on the right that knows how.
+    if op == .mul {
+        if let n = intOf(a) {
+            match b {
+                .str(y) -> { return .str(s: if n > 0 { y.repeated(n) } else { "" }) }
+                .list(y) -> { return it.newList(repeatList(it.lists[y], n)) }
+                .tuple(y) -> { return it.newTuple(repeatList(it.lists[y], n)) }
+                _ -> {}
+            }
+        }
+    }
+    match b {
+        .instance(id) -> {
+            let method = classAttr(it, it.instances[id].cls, "__r" + opMethod(op) + "__")
+            if method != Value.absent {
+                return it.callValue(method, [b, a], [], [])
+            }
+        }
+        _ -> {}
+    }
+    it.throw("TypeError", "unsupported operand type(s) for {opSymbol(op)}: '{typeName(it, a)}' and '{typeName(it, b)}'")
+}
+
+// a op= b: a list is changed where it is (`xs += [1]` is seen through
+// every name of the list); everything else is `a = a op b`.
+fn inPlaceOp(_ it: bind Interp, _ op: BinOp, _ a: Value, _ b: Value) -> Value {
+    match a {
+        .list(id) -> {
+            if op == .add {
+                let more = iterate(it, b)
+                if it.signal != .none {
+                    return Value.none
+                }
+                it.lists[id].appendAll(more)
+                return a
+            }
+            if op == .mul {
+                if let n = intOf(b) {
+                    it.lists[id] = repeatList(it.lists[id], n)
+                    return a
+                }
+            }
+        }
+        .instance(id) -> {
+            let method = classAttr(it, it.instances[id].cls, "__i" + opMethod(op) + "__")
+            if method != Value.absent {
+                return it.callValue(method, [a, b], [], [])
+            }
+        }
+        _ -> {}
+    }
+    binaryOp(it, op, a, b)
+}
+
+fn unaryOp(_ it: bind Interp, _ op: UnOp, _ v: Value) -> Value {
+    match op {
+        .not -> {
+            let yes = truthy(it, v)
+            Value.bool(b: !yes)
+        }
+        .neg -> {
+            match v {
+                .float(f) -> { return .float(f: -f) }
+                .instance(id) -> {
+                    let method = classAttr(it, it.instances[id].cls, "__neg__")
+                    if method != Value.absent {
+                        return it.callValue(method, [v], [], [])
+                    }
+                }
+                _ -> {}
+            }
+            if let i = intOf(v) {
+                if i == minInt() {
+                    return tooLarge(it)
+                }
+                return .int(i: -i)
+            }
+            it.throw("TypeError", "bad operand type for unary -: '{typeName(it, v)}'")
+        }
+        .pos -> {
+            match v {
+                .float(_) -> { return v }
+                _ -> {}
+            }
+            if let i = intOf(v) {
+                return .int(i: i)
+            }
+            it.throw("TypeError", "bad operand type for unary +: '{typeName(it, v)}'")
+        }
+        .invert -> {
+            if let i = intOf(v) {
+                return .int(i: ~i)
+            }
+            it.throw("TypeError", "bad operand type for unary ~: '{typeName(it, v)}'")
+        }
+    }
+}
+
+// ---- iteration ----
+
+// Every item a value gives when it's looped over.
+fn iterate(_ it: bind Interp, _ v: Value) -> [Value] {
+    match v {
+        .list(id) -> it.lists[id]
+        .tuple(id) -> it.lists[id]
+        .str(s) -> {
+            var out: [Value] = []
+            for c in s.characters {
+                out.append(.str(s: c))
+            }
+            out
+        }
+        .dict(id) -> dictKeys(it.dicts[id])
+        .set(id) -> dictKeys(it.dicts[id])
+        .range(start, stop, step) -> {
+            var out: [Value] = []
+            var i = start
+            while (step > 0 && i < stop) || (step < 0 && i > stop) {
+                out.append(.int(i: i))
+                i += step
+            }
+            out
+        }
+        .iterator(id) -> {
+            // What's left of it; then it's used up.
+            let from = it.iterators[id].pos
+            let items = it.iterators[id].items
+            it.iterators[id].pos = items.count
+            if from == 0 {
+                items
+            } else {
+                items.slice(from: from, to: items.count)
+            }
+        }
+        .file(id) -> {
+            var out: [Value] = []
+            let from = it.files[id].pos
+            for i in from..it.files[id].lines.count {
+                out.append(.str(s: it.files[id].lines[i]))
+            }
+            it.files[id].pos = it.files[id].lines.count
+            out
+        }
+        .instance(id) -> {
+            let cls = it.instances[id].cls
+            let method = classAttr(it, cls, "__iter__")
+            if method != Value.absent {
+                let iterator = it.callValue(method, [v], [], [])
+                if it.signal != .none {
+                    return []
+                }
+                return drain(it, iterator)
+            }
+            let getter = classAttr(it, cls, "__getitem__")
+            if getter != Value.absent {
+                // The old way: v[0], v[1], … until an IndexError.
+                var out: [Value] = []
+                var i = 0
+                while true {
+                    let item = it.callValue(getter, [v, .int(i: i)], [], [])
+                    if it.signal != .none {
+                        if exceptionMatches(it, it.exc, .klass(id: it.classIds["IndexError"] ?? -1)) {
+                            it.signal = .none
+                        }
+                        break
+                    }
+                    out.append(item)
+                    i += 1
+                }
+                return out
+            }
+            it.throw("TypeError", "'{typeName(it, v)}' object is not iterable")
+            []
+        }
+        _ -> {
+            it.throw("TypeError", "'{typeName(it, v)}' object is not iterable")
+            []
+        }
+    }
+}
+
+// The items of what `__iter__` gave: another iterable, or an object with
+// `__next__`, called until it raises StopIteration.
+fn drain(_ it: bind Interp, _ iterator: Value) -> [Value] {
+    match iterator {
+        .instance(id) -> {
+            let next = classAttr(it, it.instances[id].cls, "__next__")
+            if next == Value.absent {
+                return iterate(it, iterator)
+            }
+            var out: [Value] = []
+            while true {
+                let item = it.callValue(next, [iterator], [], [])
+                if it.signal != .none {
+                    if it.signal == .raising && exceptionMatches(it, it.exc, .klass(id: it.classIds["StopIteration"] ?? -1)) {
+                        it.signal = .none
+                    }
+                    break
+                }
+                out.append(item)
+            }
+            out
+        }
+        _ -> iterate(it, iterator)
+    }
+}
+
+// ---- indexing ----
+
+// A position in a sequence of `count` items (negative ones count from the
+// end), or nil if there's no such item.
+fn position(_ index: Int, _ count: Int) -> Int? {
+    let i = if index < 0 { index + count } else { index }
+    if i < 0 || i >= count {
+        return nil
+    }
+    i
+}
+
+fn rangeLength(_ start: Int, _ stop: Int, _ step: Int) -> Int {
+    if step > 0 && start < stop {
+        return (stop - start + step - 1) / step
+    }
+    if step < 0 && start > stop {
+        return (start - stop - step - 1) / (-step)
+    }
+    0
+}
+
+fn getItem(_ it: bind Interp, _ o: Value, _ index: Value) -> Value {
+    match o {
+        .list(id) -> {
+            if let i = intOf(index) {
+                if let at = position(i, it.lists[id].count) {
+                    return it.lists[id][at]
+                }
+                return it.throw("IndexError", "list index out of range")
+            }
+            it.throw("TypeError", "list indices must be integers or slices, not {typeName(it, index)}")
+        }
+        .dict(id) -> {
+            let h = hashKey(it, index)
+            if it.signal != .none {
+                return Value.none
+            }
+            if let at = it.dicts[id].index[h] {
+                return it.dicts[id].vals[at]
+            }
+            throwValue(it, "KeyError", index)
+        }
+        .str(s) -> {
+            if let i = intOf(index) {
+                let c = s.characters
+                if let at = position(i, c.count) {
+                    return .str(s: c[at])
+                }
+                return it.throw("IndexError", "string index out of range")
+            }
+            it.throw("TypeError", "string indices must be integers, not '{typeName(it, index)}'")
+        }
+        .tuple(id) -> {
+            if let i = intOf(index) {
+                if let at = position(i, it.lists[id].count) {
+                    return it.lists[id][at]
+                }
+                return it.throw("IndexError", "tuple index out of range")
+            }
+            it.throw("TypeError", "tuple indices must be integers or slices, not {typeName(it, index)}")
+        }
+        .range(start, stop, step) -> {
+            if let i = intOf(index) {
+                if let at = position(i, rangeLength(start, stop, step)) {
+                    return .int(i: start + at * step)
+                }
+                return it.throw("IndexError", "range object index out of range")
+            }
+            it.throw("TypeError", "range indices must be integers or slices, not {typeName(it, index)}")
+        }
+        .instance(id) -> {
+            let method = classAttr(it, it.instances[id].cls, "__getitem__")
+            if method != Value.absent {
+                return it.callValue(method, [o, index], [], [])
+            }
+            it.throw("TypeError", "'{typeName(it, o)}' object is not subscriptable")
+        }
+        // list[int] and the like, in annotations: the type itself.
+        .builtin(_) -> o
+        .klass(_) -> o
+        _ -> it.throw("TypeError", "'{typeName(it, o)}' object is not subscriptable")
+    }
+}
+
+// An exception whose argument is a value as it is (a KeyError's key).
+fn throwValue(_ it: bind Interp, _ kind: String, _ v: Value) -> Value {
+    let cls = it.classIds[kind] ?? 0
+    var fields: [String: Value] = [:]
+    fields["args"] = it.newTuple([v])
+    it.instances.append(Instance(cls: cls, fields: fields))
+    it.raise(.instance(id: it.instances.count - 1))
+    Value.none
+}
+
+// The positions a slice [lower:upper:step] takes from `count` items.
+fn sliceIndices(_ it: bind Interp, _ count: Int, _ lower: Int?, _ upper: Int?, _ step: Int?) -> [Int] {
+    let by = step ?? 1
+    var out: [Int] = []
+    if by == 0 {
+        it.throw("ValueError", "slice step cannot be zero")
+        return out
+    }
+    if by > 0 {
+        var from = lower ?? 0
+        var to = upper ?? count
+        if from < 0 {
+            from = if from + count < 0 { 0 } else { from + count }
+        }
+        if to < 0 {
+            to = if to + count < 0 { 0 } else { to + count }
+        }
+        if to > count {
+            to = count
+        }
+        var i = from
+        while i < to {
+            out.append(i)
+            i += by
+        }
+    } else {
+        var from = lower ?? (count - 1)
+        var to = upper ?? (-count - 1)
+        if from < 0 {
+            from = from + count
+        }
+        if from >= count {
+            from = count - 1
+        }
+        if to < 0 {
+            to = to + count
+        }
+        if to < -1 {
+            to = -1
+        }
+        var i = from
+        while i > to && i >= 0 {
+            out.append(i)
+            i += by
+        }
+    }
+    out
+}
+
+fn getSlice(_ it: bind Interp, _ o: Value, _ lower: Int?, _ upper: Int?, _ step: Int?) -> Value {
+    match o {
+        .list(id) -> {
+            let at = sliceIndices(it, it.lists[id].count, lower, upper, step)
+            var out: [Value] = []
+            for i in at {
+                out.append(it.lists[id][i])
+            }
+            it.newList(out)
+        }
+        .tuple(id) -> {
+            let at = sliceIndices(it, it.lists[id].count, lower, upper, step)
+            var out: [Value] = []
+            for i in at {
+                out.append(it.lists[id][i])
+            }
+            it.newTuple(out)
+        }
+        .str(s) -> {
+            let c = s.characters
+            let at = sliceIndices(it, c.count, lower, upper, step)
+            if at.isEmpty {
+                return .str(s: "")
+            }
+            if (step ?? 1) == 1 {
+                return .str(s: c.slice(from: at[0], to: at[at.count - 1] + 1).joined())
+            }
+            var out = ""
+            for i in at {
+                out += c[i]
+            }
+            Value.str(s: out)
+        }
+        .range(start, stop, step0) -> {
+            let at = sliceIndices(it, rangeLength(start, stop, step0), lower, upper, step)
+            var out: [Value] = []
+            for i in at {
+                out.append(.int(i: start + i * step0))
+            }
+            it.newList(out)
+        }
+        _ -> it.throw("TypeError", "'{typeName(it, o)}' object is not subscriptable")
+    }
+}
+
+fn setItem(_ it: bind Interp, _ o: Value, _ index: Value, _ v: Value) {
+    match o {
+        .list(id) -> {
+            if let i = intOf(index) {
+                if let at = position(i, it.lists[id].count) {
+                    it.lists[id][at] = v
+                } else {
+                    it.throw("IndexError", "list assignment index out of range")
+                }
+            } else {
+                it.throw("TypeError", "list indices must be integers or slices, not {typeName(it, index)}")
+            }
+        }
+        .dict(id) -> {
+            let h = hashKey(it, index)
+            if it.signal == .none {
+                dictSet(it.dicts[id], index, h, v)
+            }
+        }
+        .instance(id) -> {
+            let method = classAttr(it, it.instances[id].cls, "__setitem__")
+            if method != Value.absent {
+                it.callValue(method, [o, index, v], [], [])
+            } else {
+                it.throw("TypeError", "'{typeName(it, o)}' object does not support item assignment")
+            }
+        }
+        _ -> {
+            it.throw("TypeError", "'{typeName(it, o)}' object does not support item assignment")
+        }
+    }
+}
+
+// o[lower:upper:step] = v (and `del o[…]`, with nothing as `v`).
+fn setSlice(_ it: bind Interp, _ o: Value, _ lower: Int?, _ upper: Int?, _ step: Int?, _ v: Value) {
+    match o {
+        .list(id) -> {
+            let replacement = iterate(it, v)
+            if it.signal != .none {
+                return
+            }
+            let count = it.lists[id].count
+            let at = sliceIndices(it, count, lower, upper, step)
+            if it.signal != .none {
+                return
+            }
+            if (step ?? 1) == 1 {
+                // The stretch from..to is replaced, whatever its length.
+                var from = lower ?? 0
+                if from < 0 {
+                    from = if from + count < 0 { 0 } else { from + count }
+                }
+                if from > count {
+                    from = count
+                }
+                let to = if at.isEmpty { from } else { at[at.count - 1] + 1 }
+                var out = it.lists[id].slice(from: 0, to: from)
+                out.appendAll(replacement)
+                out.appendAll(it.lists[id].slice(from: to, to: count))
+                it.lists[id] = out
+                return
+            }
+            if replacement.isEmpty {
+                // (del xs[::2])
+                var out: [Value] = []
+                for i in 0..count {
+                    if !at.contains(i) {
+                        out.append(it.lists[id][i])
+                    }
+                }
+                it.lists[id] = out
+                return
+            }
+            if replacement.count != at.count {
+                it.throw("ValueError", "attempt to assign sequence of size {replacement.count} to extended slice of size {at.count}")
+                return
+            }
+            for k in at.indices {
+                it.lists[id][at[k]] = replacement[k]
+            }
+        }
+        _ -> {
+            it.throw("TypeError", "'{typeName(it, o)}' object does not support slice assignment")
+        }
+    }
+}
+
+fn deleteItem(_ it: bind Interp, _ o: Value, _ index: Value) {
+    match o {
+        .list(id) -> {
+            if let i = intOf(index) {
+                if let at = position(i, it.lists[id].count) {
+                    it.lists[id].remove(at: at)
+                } else {
+                    it.throw("IndexError", "list assignment index out of range")
+                }
+            } else {
+                it.throw("TypeError", "list indices must be integers or slices, not {typeName(it, index)}")
+            }
+        }
+        .dict(id) -> {
+            let h = hashKey(it, index)
+            if it.signal != .none {
+                return
+            }
+            if !dictRemove(it.dicts[id], h) {
+                throwValue(it, "KeyError", index)
+            }
+        }
+        .instance(id) -> {
+            let method = classAttr(it, it.instances[id].cls, "__delitem__")
+            if method != Value.absent {
+                it.callValue(method, [o, index], [], [])
+            } else {
+                it.throw("TypeError", "'{typeName(it, o)}' object doesn't support item deletion")
+            }
+        }
+        _ -> {
+            it.throw("TypeError", "'{typeName(it, o)}' object doesn't support item deletion")
+        }
+    }
+}
+
+// ---- attributes ----
+
+fn noAttribute(_ it: bind Interp, _ o: Value, _ name: String) -> Value {
+    match o {
+        .klass(id) -> it.throw("AttributeError", "type object '{it.classes[id].name}' has no attribute '{name}'")
+        .module(m) -> it.throw("AttributeError", "module '{m}' has no attribute '{name}'")
+        _ -> it.throw("AttributeError", "'{typeName(it, o)}' object has no attribute '{name}'")
+    }
+}
+
+fn getAttr(_ it: bind Interp, _ o: Value, _ name: String) -> Value {
+    match o {
+        .instance(id) -> {
+            if let v = it.instances[id].fields[name] {
+                return v
+            }
+            let cls = it.instances[id].cls
+            let found = classAttr(it, cls, name)
+            if found != Value.absent {
+                return bindAttr(it, found, o, cls)
+            }
+            if name == "__class__" {
+                return .klass(id: cls)
+            }
+            if name == "__dict__" {
+                let d = it.newDict()
+                for (k, v) in it.instances[id].fields {
+                    dictSet(it.dicts[d], .str(s: k), "s" + k, v)
+                }
+                return .dict(id: d)
+            }
+            let fallback = classAttr(it, cls, "__getattr__")
+            if fallback != Value.absent {
+                return it.callValue(fallback, [o, .str(s: name)], [], [])
+            }
+            noAttribute(it, o, name)
+        }
+        .klass(id) -> {
+            let found = classAttr(it, id, name)
+            match found {
+                .absent -> {}
+                .wrapper(kind, cell) -> {
+                    if kind == 0 {
+                        return it.cells[cell]
+                    }
+                    if kind == 1 {
+                        return it.newBound(o, it.cells[cell])
+                    }
+                    return found
+                }
+                _ -> { return found }
+            }
+            if name == "__name__" {
+                return .str(s: it.classes[id].name)
+            }
+            noAttribute(it, o, name)
+        }
+        .module(m) -> moduleAttr(it, m, name)
+        .superRef(cell, cls) -> {
+            let receiver = it.cells[cell]
+            match receiver {
+                .instance(id) -> {
+                    // The classes after `cls`, in the object's own order.
+                    let mro = it.classes[it.instances[id].cls].mro
+                    var after = false
+                    for c in mro {
+                        if after {
+                            if let v = it.classes[c].attrs[name] {
+                                return bindAttr(it, v, receiver, c)
+                            }
+                        }
+                        if c == cls {
+                            after = true
+                        }
+                    }
+                    if name == "__init__" {
+                        // BaseException's keeps its arguments; object's does nothing.
+                        if isException(it, receiver) {
+                            return it.newBound(receiver, .builtin(name: "@exception_init"))
+                        }
+                        return .builtin(name: "@noop")
+                    }
+                }
+                _ -> {}
+            }
+            noAttribute(it, o, name)
+        }
+        .function(id) -> {
+            if name == "__name__" {
+                return .str(s: it.closures[id].name)
+            }
+            if name == "__doc__" {
+                return .none
+            }
+            noAttribute(it, o, name)
+        }
+        .builtin(b) -> {
+            if name == "__name__" {
+                return .str(s: b)
+            }
+            if isTypeName(b) && hasMethod(b, name) {
+                // str.upper, dict.fromkeys: the type's method, unbound.
+                return .builtin(name: b + "." + name)
+            }
+            noAttribute(it, o, name)
+        }
+        .wrapper(kind, cell) -> {
+            if kind == 2 && name == "setter" {
+                return it.newBound(o, .builtin(name: "@setter"))
+            }
+            if name == "__func__" {
+                return it.cells[cell]
+            }
+            noAttribute(it, o, name)
+        }
+        .bound(id) -> {
+            if name == "__self__" {
+                return it.bounds[id].receiver
+            }
+            if name == "__func__" {
+                return it.bounds[id].method
+            }
+            if name == "__name__" {
+                return getAttr(it, it.bounds[id].method, name)
+            }
+            noAttribute(it, o, name)
+        }
+        _ -> {
+            let type = typeName(it, o)
+            if hasMethod(type, name) {
+                return it.newBound(o, .builtin(name: "@" + name))
+            }
+            if name == "__class__" {
+                return typeOf(it, o)
+            }
+            match o {
+                .file(id) -> {
+                    if name == "name" {
+                        return .str(s: it.files[id].path)
+                    }
+                    if name == "closed" {
+                        return .bool(b: it.files[id].closed)
+                    }
+                    if name == "mode" {
+                        return .str(s: it.files[id].mode)
+                    }
+                }
+                .float(f) -> {
+                    if name == "real" {
+                        return o
+                    }
+                    if name == "imag" {
+                        return .float(f: 0.0 * f)
+                    }
+                }
+                .int(_) -> {
+                    if name == "real" || name == "numerator" {
+                        return o
+                    }
+                    if name == "imag" {
+                        return .int(i: 0)
+                    }
+                    if name == "denominator" {
+                        return .int(i: 1)
+                    }
+                }
+                _ -> {}
+            }
+            noAttribute(it, o, name)
+        }
+    }
+}
+
+// type(v).
+fn typeOf(_ it: bind Interp, _ v: Value) -> Value {
+    match v {
+        .instance(id) -> .klass(id: it.instances[id].cls)
+        _ -> .builtin(name: typeName(it, v))
+    }
+}
+
+fn setAttr(_ it: bind Interp, _ o: Value, _ name: String, _ v: Value) {
+    match o {
+        .instance(id) -> {
+            let cls = it.instances[id].cls
+            // A property with a setter takes the value.
+            if !it.setters.isEmpty {
+                match classAttr(it, cls, name) {
+                    .wrapper(kind, cell) -> {
+                        if kind == 2 {
+                            if let setter = it.setters[cell] {
+                                it.callValue(setter, [o, v], [], [])
+                            } else {
+                                it.throw("AttributeError", "property '{name}' of '{it.classes[cls].name}' object has no setter")
+                            }
+                            return
+                        }
+                    }
+                    _ -> {}
+                }
+            }
+            it.instances[id].fields[name] = v
+        }
+        .klass(id) -> {
+            it.classes[id].attrs[name] = v
+            match v {
+                .function(fid) -> {
+                    if it.closures[fid].owner < 0 {
+                        it.closures[fid].owner = id
+                    }
+                }
+                _ -> {}
+            }
+        }
+        .module(m) -> {
+            if let e = it.modules[m] {
+                it.envs[e].vars[name] = v
+            } else {
+                it.throw("AttributeError", "can't set attributes of built-in module '{m}'")
+            }
+        }
+        _ -> {
+            it.throw("AttributeError", "'{typeName(it, o)}' object has no attribute '{name}'")
+        }
+    }
+}
+
+fn deleteAttr(_ it: bind Interp, _ o: Value, _ name: String) {
+    match o {
+        .instance(id) -> {
+            if it.instances[id].fields.removeValue(forKey: name) == nil {
+                noAttribute(it, o, name)
+            }
+        }
+        .klass(id) -> {
+            if it.classes[id].attrs.removeValue(forKey: name) == nil {
+                noAttribute(it, o, name)
+            }
+        }
+        _ -> {
+            noAttribute(it, o, name)
+        }
+    }
+}
+
+// ---- with ----
+
+fn enterContext(_ it: bind Interp, _ manager: Value) -> Value {
+    match manager {
+        .file(_) -> manager
+        .instance(id) -> {
+            let method = classAttr(it, it.instances[id].cls, "__enter__")
+            if method == Value.absent {
+                return it.throw("TypeError", "'{typeName(it, manager)}' object does not support the context manager protocol")
+            }
+            it.callValue(method, [manager], [], [])
+        }
+        _ -> it.throw("TypeError", "'{typeName(it, manager)}' object does not support the context manager protocol")
+    }
+}
+
+// Leaves a `with` block; `raised` is the exception on its way out (or
+// None). Gives whether the manager dealt with it.
+fn exitContext(_ it: bind Interp, _ manager: Value, _ raised: Value) -> Bool {
+    match manager {
+        .file(id) -> {
+            closeFile(it, id)
+            false
+        }
+        .instance(id) -> {
+            let method = classAttr(it, it.instances[id].cls, "__exit__")
+            if method == Value.absent {
+                return false
+            }
+            var kind = Value.none
+            match raised {
+                .instance(e) -> { kind = .klass(id: it.instances[e].cls) }
+                _ -> {}
+            }
+            let r = it.callValue(method, [manager, kind, raised, .none], [], [])
+            if it.signal != .none {
+                return false
+            }
+            truthy(it, r)
+        }
+        _ -> false
+    }
+}

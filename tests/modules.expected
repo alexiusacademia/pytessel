@@ -1,0 +1,35 @@
+4.0 1.4142135623730951 3.141592653589793 2.718281828459045 -3 3 7 -2
+3628800 6 256.0 1.0 3.0 3.0 3.0
+1.0 1.0 0.785398 5.0 180.0
+True True True 4 2.0 10 24
+True -3.0 -1.0 True 6.283185307179586
+ValueError: math domain error
+{"name": "Ada", "tags": ["x", "y"], "n": 1.5, "ok": true, "none": null, "nested": {"a": [1, 2, {"b": "c"}]}}
+{
+  "name": "Ada",
+  "tags": [
+    "x",
+    "y"
+  ],
+  "n": 1.5,
+  "ok": true,
+  "none": null,
+  "nested": {
+    "a": [
+      1,
+      2,
+      {
+        "b": "c"
+      }
+    ]
+  }
+}
+[1, "two", 3.0, false, null] "quote\"s\n" {"a": 2, "b": 1}
+True c [1, 2.5, 'x', True, None, {'k': []}] é
+120 10
+abcde 0123456789 52
+<class 'list'> 9223372036854775807 a/b/c.txt z.py /x/y ('a/b.tar', '.gz')
+True False True True
+True True True True 5 True True
+ModuleNotFoundError No module named 'nonexistent_module'
+12 42 from helper 9 helper

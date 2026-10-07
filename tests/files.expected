@@ -1,0 +1,9 @@
+'first line\nsecond line\nthird line\n'
+1 first line
+2 second line
+3 third line
+True appended
+ 4
+'first line\n' 'second line\n' ['third line', 'appended']
+False
+FileNotFoundError: [Errno 2] No such file or directory: 'does/not/exist.txt'

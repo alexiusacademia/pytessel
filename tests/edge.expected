@@ -1,0 +1,39 @@
+[1, 2, 3] [] bc ef fdb [1, 3] [9, 6, 3, 0]
+['a', 1, 'a', 6, 'a', 8, 'a']
+[1, 'a', 'a', 8] 2 8 4 True False
+2 5 2 True 1 t True
+True True a False inf -inf
+3 -4 -2 2 3.0 (-4, 1) (3.0, 1.5) 512 -4 4
+True True False True True True
+False True False True False False False False False
+[1] True
+6 5
+6
+2 1
+(2, 6)
+[3, 2, 1] [1, 2, 3] [(1, 'z'), (2, 'a'), (2, 'b')] ['A', 'b', 'c'] [3, 2, 1]
+[('bob', 25), ('carol', 25), ('alice', 30)] [('alice', 30), ('bob', 25), ('carol', 25)] ('alice', 30) ('bob', 25)
+{'the': 3, 'quick': 1, 'lazy': 1, 'end': 1} the [('the', 3), ('end', 1), ('lazy', 1), ('quick', 1)]
+tuple none 4 True
+unhashable type: 'list'
+1 [2, 3] []
+[('a', 0, True)] {'a': 0, 'b': 1, 'c': 2} [(1, 'x'), (2, 'y')]
+True False True True True True
+1 12 -3 1000.0 -2.5 None [1, 'a'] 'a\'b"c'
+2.5 a [1, 3] c 3 empty
+1.0 2.67 1200.0 -2 0 2 7 <class 'int'> <class 'float'>
+10 3 8 0.0 True 25
+6 0 [11, 22]
+3 β ΑΒΓ γβα [945, 946, 947] **日本語**
+abc tab:	| nl:\n AB end
+[1, 2] [1, 2, 'a', 'b'] {'a': 1, 'b': 2} (1, 2, 3)
+1-2-3
+ab!
+
+[2, 4, 6] [4, 5, 6] [1, 2, 3, 4, 5] [6, 5] False
+True True True len <class 'builtin_function_or_method'> builtin_function_or_method
+2 last 3 0 1
+20 10
+[1, 2] False True
+b abcde 8364 0x20ac
+4611686018427387904 9223372036854775807 -9223372036854775808 4611686018427387904

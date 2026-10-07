@@ -1,0 +1,26 @@
+9 5 14 3.5 3 1 49
+-4 1 -4 -1 0.5 1.4142135623730951
+3.5 6.0 2.5 1000.0 1e+16 1e-05 0.30000000000000004 0.3333333333333333
+3.0 1.5 0.5 inf -inf
+31 5 15 1000000
+True False True True False False True
+1 7 6 -6 1024 128
+None True False <class 'int'> <class 'str'> <class 'float'> <class 'NoneType'> <class 'list'>
+HELLO, WORLD hello, world 12 H d Hello World dlroW ,olleH Hlo ol
+Hello, Python ['Hello', 'World'] a-b-c
+abcabcabc ab True True 4 3
+pad| ***x*** 00042 Test TeSt
+"it's" 'say "hi"' 'a\nb' 3.0 1e+100
+big
+total 16
+while done -1
+for done 2
+10 7 4 1 
+2 1
+1 [2, 3, 4] ['a', 'b'] c
+1 2 default both 0
+3 2.5 1 9 6 5050
+2 4 2.57 0 (3, 2) 1024 24
+42 3 -3 2.5 255 42! False True
+0xff 0b101 0o10 A 97 €
+1000000000000000000 4611686018427387904 -4611686018427387904

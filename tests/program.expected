@@ -1,0 +1,23 @@
+Item          Qty     Price       Total
+---------------------------------------
+gadget         12     19.99      239.88
+gizmo           3   1249.00    3,747.00
+widget        150      2.50      375.00
+---------------------------------------
+Total                          4,361.88
+3 {'electronic': ['gadget'], 'untagged': ['gizmo'], 'metal': ['widget'], 'small': ['widget']}
+removed 2 gadget
+ValueError: only 3 gizmo left
+KeyError: "no item called 'thing'"
+removed 3 gizmo
+Item          Qty     Price       Total
+---------------------------------------
+gadget         10     19.99      199.90
+widget        150      2.50      375.00
+---------------------------------------
+Total                            574.90
+[2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59] 1229
+[('the', 4), ('and', 2), ('cat', 2), ('hat', 2), ('that', 2)]
+1023 [('A', 'B'), ('A', 'C'), ('B', 'C')]
+[[1, 4], [2, 5], [3, 6]] [[14, 32], [32, 77]]
+1161 112

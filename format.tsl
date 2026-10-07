@@ -1,0 +1,598 @@
+// Formatting text: the specs of f-strings and format() (`{x:>8.2f}`), the
+// `%` operator ("%d items" % n), and str.format().
+
+// A format spec, taken apart: [[fill]align][sign][#][0][width][,][.precision][type]
+struct Spec {
+    fill: String = " "
+    align: String = ""
+    sign: String = "-"
+    alternate: Bool = false
+    width: Int = 0
+    grouping: String = ""
+    precision: Int = -1
+    type: String = ""
+    bad: Bool = false
+}
+
+fn parseSpec(_ text: String) -> Spec {
+    var spec = Spec()
+    let c = text.characters
+    var i = 0
+    if c.count >= 2 && "<>^=".contains(c[1]) {
+        spec.fill = c[0]
+        spec.align = c[1]
+        i = 2
+    } else if c.count >= 1 && "<>^=".contains(c[0]) {
+        spec.align = c[0]
+        i = 1
+    }
+    if i < c.count && (c[i] == "+" || c[i] == "-" || c[i] == " ") {
+        spec.sign = c[i]
+        i += 1
+    }
+    if i < c.count && c[i] == "#" {
+        spec.alternate = true
+        i += 1
+    }
+    if i < c.count && c[i] == "0" {
+        if spec.align == "" {
+            spec.fill = "0"
+            spec.align = "="
+        }
+        i += 1
+    }
+    var digits = ""
+    while i < c.count && isDigitChar(c[i]) {
+        digits += c[i]
+        i += 1
+    }
+    spec.width = Int(digits) ?? 0
+    if i < c.count && (c[i] == "," || c[i] == "_") {
+        spec.grouping = c[i]
+        i += 1
+    }
+    if i < c.count && c[i] == "." {
+        i += 1
+        digits = ""
+        while i < c.count && isDigitChar(c[i]) {
+            digits += c[i]
+            i += 1
+        }
+        spec.precision = Int(digits) ?? 0
+    }
+    if i < c.count {
+        spec.type = c[i]
+        i += 1
+    }
+    if i < c.count {
+        spec.bad = true
+    }
+    spec
+}
+
+// 1234567 -> 1,234,567
+fn groupDigits(_ digits: String, _ separator: String, _ every: Int) -> String {
+    let c = digits.characters
+    var out = ""
+    for i in c.indices {
+        if i > 0 && (c.count - i) % every == 0 {
+            out += separator
+        }
+        out += c[i]
+    }
+    out
+}
+
+// A number's text (without its sign) with its sign, padding and alignment.
+fn finishNumber(_ spec: Spec, _ negative: Bool, _ body: String, _ prefix: String) -> String {
+    var sign = ""
+    if negative {
+        sign = "-"
+    } else if spec.sign == "+" {
+        sign = "+"
+    } else if spec.sign == " " {
+        sign = " "
+    }
+    let text = sign + prefix + body
+    if spec.width <= text.count {
+        return text
+    }
+    if spec.align == "=" {
+        // The padding goes between the sign and the digits.
+        return sign + prefix + spec.fill.repeated(spec.width - text.count) + body
+    }
+    padText(text, spec.width, spec.fill, if spec.align == "" { ">" } else { spec.align })
+}
+
+// x as [digits before the point].[`decimals` digits], rounded.
+fn fixedText(_ x: Float, _ decimals: Int) -> String {
+    x.formatted(decimals: decimals)
+}
+
+// The power of ten of x's first digit, once x is rounded to `digits` digits.
+fn exponentOf(_ x: Float, _ digits: Int) -> Int {
+    if x == 0.0 {
+        return 0
+    }
+    var e = Int(floor(log10(x)))
+    // (log10 can be a hair off at powers of ten; and rounding can add a digit.)
+    if x / pow(10.0, Float(e)) >= 10.0 {
+        e += 1
+    } else if x / pow(10.0, Float(e)) < 1.0 {
+        e -= 1
+    }
+    let shown = fixedText(x / pow(10.0, Float(e)), if digits > 0 { digits - 1 } else { 0 })
+    if shown.hasPrefix("10") {
+        e += 1
+    }
+    e
+}
+
+// x (not negative) as d.ddde+XX with `decimals` digits after the point.
+fn exponentText(_ x: Float, _ decimals: Int, _ letter: String) -> String {
+    let e = exponentOf(x, decimals + 1)
+    let mantissa = if x == 0.0 { 0.0 } else { x / pow(10.0, Float(e)) }
+    let size = if e < 0 { -e } else { e }
+    fixedText(mantissa, decimals) + letter + (if e < 0 { "-" } else { "+" }) + (if size < 10 { "0" } else { "" }) + "{size}"
+}
+
+fn stripZeros(_ text: String) -> String {
+    if !text.contains(".") {
+        return text
+    }
+    var t = text
+    while t.hasSuffix("0") {
+        t = t.substring(from: 0, to: t.count - 1)
+    }
+    if t.hasSuffix(".") {
+        t = t.substring(from: 0, to: t.count - 1)
+    }
+    t
+}
+
+// x (not negative) in the "general" format: `digits` digits that count,
+// as a plain number when that's short and with an exponent otherwise.
+fn generalText(_ x: Float, _ digits: Int, _ letter: String, _ keepZeros: Bool) -> String {
+    let p = if digits == 0 { 1 } else { digits }
+    let e = exponentOf(x, p)
+    if e >= -4 && e < p {
+        let text = fixedText(x, p - 1 - e)
+        return if keepZeros { text } else { stripZeros(text) }
+    }
+    let text = exponentText(x, p - 1, letter)
+    if keepZeros {
+        return text
+    }
+    let parts = text.split(letter)
+    stripZeros(parts[0]) + letter + parts[1]
+}
+
+fn formatFloat(_ spec: Spec, _ value: Float) -> String {
+    if value.isNaN {
+        return finishNumber(spec, false, if spec.type == "F" || spec.type == "E" || spec.type == "G" { "NAN" } else { "nan" }, "")
+    }
+    let negative = value < 0.0 || (value == 0.0 && 1.0 / value < 0.0)
+    let x = if value < 0.0 { -value } else { value }
+    if !x.isFinite {
+        return finishNumber(spec, negative, if spec.type == "F" || spec.type == "E" || spec.type == "G" { "INF" } else { "inf" }, "")
+    }
+    var body = ""
+    match spec.type {
+        "f", "F" -> { body = fixedText(x, if spec.precision < 0 { 6 } else { spec.precision }) }
+        "e" -> { body = exponentText(x, if spec.precision < 0 { 6 } else { spec.precision }, "e") }
+        "E" -> { body = exponentText(x, if spec.precision < 0 { 6 } else { spec.precision }, "E") }
+        "g" -> { body = generalText(x, if spec.precision < 0 { 6 } else { spec.precision }, "e", spec.alternate) }
+        "G" -> { body = generalText(x, if spec.precision < 0 { 6 } else { spec.precision }, "E", spec.alternate) }
+        "%" -> { body = fixedText(x * 100.0, if spec.precision < 0 { 6 } else { spec.precision }) + "%" }
+        _ -> {
+            if spec.precision >= 0 {
+                body = generalText(x, spec.precision, "e", false)
+                // (A float stays a float: 2.0, not 2.)
+                if !body.contains(".") && !body.contains("e") {
+                    body += ".0"
+                }
+            } else {
+                body = floatRepr(x)
+            }
+        }
+    }
+    if spec.grouping != "" {
+        // Only the digits before the point are grouped.
+        var whole = body
+        var rest = ""
+        for mark in [".", "e", "E", "%"] {
+            if let at = whole.find(mark) {
+                rest = whole.substring(from: at, to: whole.count) + rest
+                whole = whole.substring(from: 0, to: at)
+            }
+        }
+        body = groupDigits(whole, spec.grouping, 3) + rest
+    }
+    finishNumber(spec, negative, body, "")
+}
+
+fn formatInt(_ it: bind Interp, _ spec: Spec, _ value: Int) -> String {
+    let negative = value < 0
+    // (The digits of the number without its sign.)
+    var body = ""
+    var prefix = ""
+    match spec.type {
+        "b" -> {
+            body = intInBase(value, base: 2, prefix: "")
+            prefix = if spec.alternate { "0b" } else { "" }
+        }
+        "o" -> {
+            body = intInBase(value, base: 8, prefix: "")
+            prefix = if spec.alternate { "0o" } else { "" }
+        }
+        "x" -> {
+            body = intInBase(value, base: 16, prefix: "")
+            prefix = if spec.alternate { "0x" } else { "" }
+        }
+        "X" -> {
+            body = intInBase(value, base: 16, prefix: "").uppercase()
+            prefix = if spec.alternate { "0X" } else { "" }
+        }
+        "c" -> { return padText(chrOf(value), spec.width, spec.fill, if spec.align == "" { "<" } else { spec.align }) }
+        _ -> { body = "{value}" }
+    }
+    if body.hasPrefix("-") {
+        body = body.substring(from: 1, to: body.count)
+    }
+    if spec.grouping != "" {
+        body = groupDigits(body, spec.grouping, if spec.type == "" || spec.type == "d" || spec.type == "n" { 3 } else { 4 })
+    }
+    finishNumber(spec, negative, body, prefix)
+}
+
+// format(v, spec): what `{v:spec}` shows.
+fn formatValue(_ it: bind Interp, _ v: Value, _ specText: String) -> String {
+    if specText == "" {
+        return toStr(it, v)
+    }
+    match v {
+        .instance(id) -> {
+            let method = classAttr(it, it.instances[id].cls, "__format__")
+            if method != Value.absent {
+                return toStr(it, it.callValue(method, [v, .str(s: specText)], [], []))
+            }
+        }
+        _ -> {}
+    }
+    let spec = parseSpec(specText)
+    if spec.bad {
+        it.throw("ValueError", "Invalid format specifier '{specText}' for object of type '{typeName(it, v)}'")
+        return ""
+    }
+    let t = spec.type
+    match v {
+        .float(f) -> {
+            if t == "" || "eEfFgG%n".contains(t) {
+                return formatFloat(spec, f)
+            }
+            it.throw("ValueError", "Unknown format code '{t}' for object of type 'float'")
+            return ""
+        }
+        .int(i) -> {
+            if t != "" && "eEfFgG%".contains(t) {
+                return formatFloat(spec, Float(i))
+            }
+            if t == "" || "bcdoxXn".contains(t) {
+                return formatInt(it, spec, i)
+            }
+            it.throw("ValueError", "Unknown format code '{t}' for object of type 'int'")
+            return ""
+        }
+        .bool(b) -> {
+            if t != "" && "eEfFgG%".contains(t) {
+                return formatFloat(spec, if b { 1.0 } else { 0.0 })
+            }
+            if t != "" && "bcdoxXn".contains(t) {
+                return formatInt(it, spec, if b { 1 } else { 0 })
+            }
+        }
+        _ -> {}
+    }
+    if t != "" && t != "s" {
+        it.throw("ValueError", "Unknown format code '{t}' for object of type '{typeName(it, v)}'")
+        return ""
+    }
+    var text = toStr(it, v)
+    if spec.precision >= 0 && text.count > spec.precision {
+        text = text.substring(from: 0, to: spec.precision)
+    }
+    padText(text, spec.width, spec.fill, if spec.align == "" || spec.align == "=" { "<" } else { spec.align })
+}
+
+// "…%s…%d…" % values
+fn percentFormat(_ it: bind Interp, _ format: String, _ values: Value) -> String {
+    var args: [Value] = [values]
+    var mapping = -1
+    match values {
+        .tuple(id) -> { args = it.lists[id] }
+        .dict(id) -> { mapping = id }
+        _ -> {}
+    }
+    let c = format.characters
+    var out = ""
+    var next = 0
+    var i = 0
+    while i < c.count {
+        if c[i] != "%" {
+            out += c[i]
+            i += 1
+            continue
+        }
+        i += 1
+        if i >= c.count {
+            it.throw("ValueError", "incomplete format")
+            return ""
+        }
+        if c[i] == "%" {
+            out += "%"
+            i += 1
+            continue
+        }
+        var value = Value.absent
+        if c[i] == "(" {
+            // %(name)s: from a dictionary.
+            var name = ""
+            i += 1
+            while i < c.count && c[i] != ")" {
+                name += c[i]
+                i += 1
+            }
+            i += 1
+            if mapping < 0 {
+                it.throw("TypeError", "format requires a mapping")
+                return ""
+            }
+            value = dictGet(it.dicts[mapping], "s" + name)
+            if value == Value.absent {
+                throwValue(it, "KeyError", .str(s: name))
+                return ""
+            }
+        }
+        var spec = Spec()
+        while i < c.count && "-+ #0".contains(c[i]) {
+            if c[i] == "-" {
+                spec.align = "<"
+            } else if c[i] == "+" {
+                spec.sign = "+"
+            } else if c[i] == " " {
+                spec.sign = " "
+            } else if c[i] == "#" {
+                spec.alternate = true
+            } else if spec.align == "" {
+                spec.fill = "0"
+                spec.align = "="
+            }
+            i += 1
+        }
+        var digits = ""
+        while i < c.count && isDigitChar(c[i]) {
+            digits += c[i]
+            i += 1
+        }
+        spec.width = Int(digits) ?? 0
+        if i < c.count && c[i] == "." {
+            i += 1
+            digits = ""
+            while i < c.count && isDigitChar(c[i]) {
+                digits += c[i]
+                i += 1
+            }
+            spec.precision = Int(digits) ?? 0
+        }
+        if i >= c.count {
+            it.throw("ValueError", "incomplete format")
+            return ""
+        }
+        let kind = c[i]
+        i += 1
+        if value == Value.absent {
+            if next >= args.count {
+                it.throw("TypeError", "not enough arguments for format string")
+                return ""
+            }
+            value = args[next]
+            next += 1
+        }
+        match kind {
+            "s", "r", "a" -> {
+                var text = if kind == "s" { toStr(it, value) } else { toRepr(it, value) }
+                if spec.precision >= 0 && text.count > spec.precision {
+                    text = text.substring(from: 0, to: spec.precision)
+                }
+                if spec.fill == "0" {
+                    spec.fill = " "
+                }
+                out += padText(text, spec.width, spec.fill, if spec.align == "<" { "<" } else { ">" })
+            }
+            "d", "i", "u" -> {
+                var whole = 0
+                match value {
+                    .float(f) -> { whole = Int(f) }
+                    _ -> {
+                        if let n = intOf(value) {
+                            whole = n
+                        } else {
+                            it.throw("TypeError", "%{kind} format: a real number is required, not {typeName(it, value)}")
+                            return ""
+                        }
+                    }
+                }
+                spec.precision = -1
+                out += formatInt(it, spec, whole)
+            }
+            "x", "X", "o" -> {
+                if let n = intOf(value) {
+                    spec.type = kind
+                    spec.precision = -1
+                    out += formatInt(it, spec, n)
+                } else {
+                    it.throw("TypeError", "%{kind} format: an integer is required, not {typeName(it, value)}")
+                    return ""
+                }
+            }
+            "f", "F", "e", "E", "g", "G" -> {
+                if let x = floatOf(value) {
+                    spec.type = kind
+                    out += formatFloat(spec, x)
+                } else {
+                    it.throw("TypeError", "must be real number, not {typeName(it, value)}")
+                    return ""
+                }
+            }
+            "c" -> {
+                match value {
+                    .str(s) -> { out += s }
+                    _ -> { out += chrOf(intOf(value) ?? 63) }
+                }
+            }
+            _ -> {
+                it.throw("ValueError", "unsupported format character '{kind}'")
+                return ""
+            }
+        }
+        if it.signal != .none {
+            return ""
+        }
+    }
+    if mapping < 0 && next < args.count {
+        it.throw("TypeError", "not all arguments converted during string formatting")
+        return ""
+    }
+    out
+}
+
+// "{} and {name:>5}".format(…)
+fn formatText(_ it: bind Interp, _ format: String, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> String {
+    let c = format.characters
+    var out = ""
+    var auto = 0
+    var i = 0
+    while i < c.count {
+        let ch = c[i]
+        if ch == "\{" {
+            if i + 1 < c.count && c[i + 1] == "\{" {
+                out += "\{"
+                i += 2
+                continue
+            }
+            // The field, up to its closing brace (a spec can have fields of its own).
+            var depth = 1
+            var j = i + 1
+            var field = ""
+            while j < c.count {
+                if c[j] == "\{" {
+                    depth += 1
+                } else if c[j] == "\}" {
+                    depth -= 1
+                    if depth == 0 {
+                        break
+                    }
+                }
+                field += c[j]
+                j += 1
+            }
+            if j >= c.count {
+                it.throw("ValueError", "Single '\{' encountered in format string")
+                return ""
+            }
+            i = j + 1
+            var name = field
+            var specText = ""
+            if let colon = field.find(":") {
+                name = field.substring(from: 0, to: colon)
+                specText = field.substring(from: colon + 1, to: field.count)
+            }
+            var conversion = ""
+            if let bang = name.find("!") {
+                conversion = name.substring(from: bang + 1, to: name.count)
+                name = name.substring(from: 0, to: bang)
+            }
+            // The name: a number, a keyword, or nothing (the next one),
+            // then .attribute and [index] steps.
+            var base = ""
+            var rest = name
+            let n = name.characters
+            var k = 0
+            while k < n.count && n[k] != "." && n[k] != "[" {
+                base += n[k]
+                k += 1
+            }
+            rest = n.slice(from: k, to: n.count).joined()
+            var value = Value.none
+            if base == "" {
+                if auto >= args.count {
+                    it.throw("IndexError", "Replacement index {auto} out of range for positional args tuple")
+                    return ""
+                }
+                value = args[auto]
+                auto += 1
+            } else if let index = Int(base) {
+                if index < 0 || index >= args.count {
+                    it.throw("IndexError", "Replacement index {index} out of range for positional args tuple")
+                    return ""
+                }
+                value = args[index]
+            } else {
+                value = keyword(kwNames, kwValues, base)
+                if value == Value.absent {
+                    throwValue(it, "KeyError", .str(s: base))
+                    return ""
+                }
+            }
+            let r = rest.characters
+            k = 0
+            while k < r.count {
+                var step = ""
+                if r[k] == "." {
+                    k += 1
+                    while k < r.count && r[k] != "." && r[k] != "[" {
+                        step += r[k]
+                        k += 1
+                    }
+                    value = getAttr(it, value, step)
+                } else {
+                    k += 1
+                    while k < r.count && r[k] != "]" {
+                        step += r[k]
+                        k += 1
+                    }
+                    k += 1
+                    value = getItem(it, value, if let index = Int(step) { Value.int(i: index) } else { Value.str(s: step) })
+                }
+                if it.signal != .none {
+                    return ""
+                }
+            }
+            if conversion == "r" || conversion == "a" {
+                value = .str(s: toRepr(it, value))
+            } else if conversion == "s" {
+                value = .str(s: toStr(it, value))
+            }
+            if specText.contains("\{") {
+                specText = formatText(it, specText, args, kwNames, kwValues)
+            }
+            out += formatValue(it, value, specText)
+            if it.signal != .none {
+                return ""
+            }
+            continue
+        }
+        if ch == "\}" {
+            if i + 1 < c.count && c[i + 1] == "\}" {
+                out += "\}"
+                i += 2
+                continue
+            }
+            it.throw("ValueError", "Single '\}' encountered in format string")
+            return ""
+        }
+        out += ch
+        i += 1
+    }
+    out
+}
