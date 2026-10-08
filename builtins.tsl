@@ -520,7 +520,7 @@ fn closeFile(_ it: bind Interp, _ id: Int) {
 fn runSource(_ it: bind Interp, _ source: String, _ asExpression: Bool) -> Value {
     parseInto(it.prog, source)
     if it.prog.error != "" {
-        it.throw("SyntaxError", it.prog.error)
+        it.throw("SyntaxError", "{it.prog.error} (<string>, line {it.prog.errorLine})")
         // (What's wrong and where, as `e.msg` and `e.lineno`.)
         match it.exc {
             .instance(id) -> {
