@@ -201,7 +201,3 @@ tessel build . -o pytessel
 tests/run.sh             # each tests/*.py, compared with what CPython prints
 tests/run.sh --update    # write the expected output again (needs python3)
 ```
-
-`tests/pending/` has tests that can't pass yet (`itertools_lazy.py`: the
-iterators that never end, which wait for generators that run a step at a
-time). `tests/run.sh` doesn't run them.
