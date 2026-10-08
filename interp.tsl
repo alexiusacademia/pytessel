@@ -59,6 +59,33 @@ struct Interp {
     exiting: Bool = false
     exitCode: Int = 0
 
+    // Inside another program (embed.tsl). What's printed is kept in
+    // `out` instead of shown; with `sandbox`, files, the keyboard and the
+    // system are out of reach; `budget` is how many more statements and
+    // calls may run (-1: no limit); `sources` has modules given as text,
+    // by name; `host` is the program around, for `__host__(…)`.
+    capture: Bool = false
+    out: [String] = []
+    sandbox: Bool = false
+    budget: Int = -1
+    sources: [String: String] = [:]
+    host: Host = NoHost()
+
+    // Counts a statement or a call against the budget. False (with
+    // TimeoutError raised) when there's none left: everything after it
+    // fails the same way, so the program can only end.
+    fn spend() -> Bool {
+        if budget < 0 {
+            return true
+        }
+        if budget == 0 {
+            throw("TimeoutError", "the script ran for too long and was stopped")
+            return false
+        }
+        budget -= 1
+        true
+    }
+
     // ---- making values ----
 
     fn newList(_ items: [Value]) -> Value {
@@ -545,6 +572,9 @@ struct Interp {
     fn comprehend(_ kind: Int, _ element: Int, _ value: Int, _ targets: [Int], _ iters: [Int], _ conds: [[Int]],
                   _ at: Int, _ out: bind [Value], _ outValues: bind [Value]) {
         if at == targets.count {
+            if !spend() {
+                return
+            }
             let v = eval(element)
             if signal != .none {
                 return
@@ -676,6 +706,9 @@ struct Interp {
     }
 
     fn callValue(_ f: Value, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
+        if !spend() {
+            return Value.none
+        }
         match f {
             .function(id) -> callClosure(id, args, kwNames, kwValues)
             .builtin(name) -> callBuiltin(self, name, args, kwNames, kwValues)
@@ -895,6 +928,9 @@ struct Interp {
 
     fn exec(_ n: Int) {
         line = prog.lines[n]
+        if !spend() {
+            return
+        }
         match prog.nodes[n] {
             .exprStmt(value) -> {
                 eval(value)

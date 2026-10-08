@@ -6,34 +6,6 @@
 //
 // See README.md for what of Python it runs.
 
-fn pytesselVersion() -> String {
-    "0.1.0"
-}
-
-// An interpreter with Python's built-in names, ready to run a program.
-fn newInterp() -> Interp {
-    var it = Interp(prog: Program(), signal: Signal.none, retval: Value.none, exc: Value.none, curSelf: Value.none)
-    // The first environment has the built-ins; a program's own names go in
-    // the one after it.
-    it.envs.append(Env())
-    for name in builtinNames() {
-        it.envs[0].vars[name] = .builtin(name: name)
-    }
-    let object = makeClass(it, "object", [], [:])
-    it.classIds["object"] = object
-    it.envs[0].vars["object"] = .klass(id: object)
-    for (name, base) in exceptionClasses() {
-        let id = makeClass(it, name, [it.classIds[base] ?? 0], [:])
-        it.classIds[name] = id
-        it.envs[0].vars[name] = .klass(id: id)
-    }
-    it.envs.append(Env(parent: 0))
-    it.envs[1].captured = true
-    it.envs[1].vars["__name__"] = .str(s: "__main__")
-    it.env = 1
-    it
-}
-
 // Says what exception ended the program (or the line at the prompt), as
 // Python does, and forgets it.
 fn reportException(_ it: bind Interp) {
@@ -94,25 +66,6 @@ fn reportException(_ it: bind Interp) {
 fn reportSyntaxError(_ it: bind Interp) {
     printError("  File \"{it.scriptName}\", line {it.prog.errorLine}")
     printError("SyntaxError: {it.prog.error}")
-}
-
-// Back to the top after an error at the prompt.
-fn reset(_ it: bind Interp) {
-    it.signal = .none
-    it.env = 1
-    it.depth = 0
-    it.funcName = "<module>"
-    it.curClass = -1
-    it.yields = []
-    it.handling = []
-}
-
-fn closeFiles(_ it: bind Interp) {
-    for id in it.files.indices {
-        if !it.files[id].closed {
-            closeFile(it, id)
-        }
-    }
 }
 
 // Runs a program's text. Gives the status the program ends with.

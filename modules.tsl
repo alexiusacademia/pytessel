@@ -112,9 +112,13 @@ fn importModule(_ it: bind Interp, _ name: String) -> Value {
     if it.modules.contains(key: name) {
         return .module(name: name)
     }
-    // A file next to the program: helpers.py for `import helpers`.
-    let path = joinPath(it.scriptDir, name.replace(".", with: "/") + ".py")
-    if let source = readFile(path: path) {
+    // A module given as text by the program around (embed.tsl), or a file
+    // next to the program: helpers.py for `import helpers`.
+    var text = it.sources[name]
+    if text == nil && !it.sandbox {
+        text = readFile(path: joinPath(it.scriptDir, name.replace(".", with: "/") + ".py"))
+    }
+    if let source = text {
         parseInto(it.prog, source)
         if it.prog.error != "" {
             return it.throw("SyntaxError", "{it.prog.error} ({name}.py, line {it.prog.errorLine})")
@@ -579,6 +583,14 @@ fn pathCall(_ it: bind Interp, _ name: String, _ args: [Value]) -> Value {
 
 // A built-in module's function: math.sqrt(2).
 fn moduleCall(_ it: bind Interp, _ m: String, _ name: String, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
+    // In a sandbox, nothing that reaches the system: files, folders, the
+    // environment, waiting.
+    if it.sandbox {
+        let pure = ["join", "basename", "dirname", "splitext"]
+        if m == "os" || (m == "os.path" && !pure.contains(name)) || (m == "time" && name == "sleep") {
+            return it.throw("PermissionError", "{m}.{name}() isn't available here")
+        }
+    }
     if let e = it.modules[m] {
         if let f = it.envs[e].vars[name] {
             return it.callValue(f, args, kwNames, kwValues)
@@ -650,11 +662,7 @@ fn moduleCall(_ it: bind Interp, _ m: String, _ name: String, _ args: [Value], _
         "sys.stdout", "sys.stderr" -> {
             if name == "write" {
                 let text = toStr(it, args.first ?? Value.str(s: ""))
-                if m == "sys.stderr" {
-                    printError(text, terminator: "")
-                } else {
-                    print(text, terminator: "")
-                }
+                emit(it, text, toError: m == "sys.stderr")
                 return .int(i: text.count)
             }
             Value.none

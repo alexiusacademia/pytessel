@@ -1,0 +1,381 @@
+// PyTessel inside another program: a `Session` runs Python given as text,
+// keeps what it prints, calls its functions with values of the program's
+// own, and lets the Python reach the program through `__host__(…)`.
+//
+// To use PyTessel as a module, copy every .tsl file here except main.tsl
+// into a folder of the program and `import` that folder. (main.tsl is the
+// `pytessel` command.)
+//
+//     var py = python.newSession()
+//     let r = python.run(py, "def double(x):\n    return x * 2\n")
+//     let c = python.callFunction(py, "double", [.int(i: 21)])    // c.value is .int(42)
+
+fn pytesselVersion() -> String {
+    "0.1.0"
+}
+
+// An interpreter with Python's built-in names, ready to run a program.
+fn newInterp() -> Interp {
+    var it = Interp(prog: Program(), signal: Signal.none, retval: Value.none, exc: Value.none, curSelf: Value.none)
+    // The first environment has the built-ins; a program's own names go in
+    // the one after it.
+    it.envs.append(Env())
+    for name in builtinNames() {
+        it.envs[0].vars[name] = .builtin(name: name)
+    }
+    let object = makeClass(it, "object", [], [:])
+    it.classIds["object"] = object
+    it.envs[0].vars["object"] = .klass(id: object)
+    for (name, base) in exceptionClasses() {
+        let id = makeClass(it, name, [it.classIds[base] ?? 0], [:])
+        it.classIds[name] = id
+        it.envs[0].vars[name] = .klass(id: id)
+    }
+    it.envs.append(Env(parent: 0))
+    it.envs[1].captured = true
+    it.envs[1].vars["__name__"] = .str(s: "__main__")
+    it.env = 1
+    it
+}
+
+// Back to the top after an error at the prompt.
+fn reset(_ it: bind Interp) {
+    it.signal = .none
+    it.env = 1
+    it.depth = 0
+    it.funcName = "<module>"
+    it.curClass = -1
+    it.yields = []
+    it.handling = []
+}
+
+fn closeFiles(_ it: bind Interp) {
+    for id in it.files.indices {
+        if !it.files[id].closed {
+            closeFile(it, id)
+        }
+    }
+}
+
+// ---- what's printed ----
+
+// Shows a text the program printed, or keeps it for the program around.
+fn emit(_ it: bind Interp, _ text: String, toError: Bool) {
+    if it.capture {
+        it.out.append(text)
+    } else if toError {
+        printError(text, terminator: "")
+    } else {
+        print(text, terminator: "")
+    }
+}
+
+// ---- values that cross ----
+
+// A value passed between Python and the program around it. Python's
+// tuples arrive as lists; a dictionary as a list of [key, value] lists.
+// `error` is an exception: its class's name and its message.
+public enum HostValue {
+    none
+    bool(b: Bool)
+    int(i: Int)
+    float(f: Float)
+    str(s: String)
+    list(items: [HostValue])
+    error(kind: String, message: String)
+}
+
+// The program around: what `__host__(name, …)` in Python calls. Giving
+// back an `error` raises that exception in the Python.
+public interface Host {
+    fn call(_ name: String, _ args: [HostValue]) -> HostValue
+}
+
+// The host when there's none.
+public struct NoHost: Host {
+    fn call(_ name: String, _ args: [HostValue]) -> HostValue {
+        return .error(kind: "RuntimeError", message: "'{name}' isn't available here")
+    }
+}
+
+fn hostList(_ it: bind Interp, _ id: Int) -> HostValue {
+    var items: [HostValue] = []
+    for item in it.lists[id] {
+        items.append(toHost(it, item))
+    }
+    return .list(items: items)
+}
+
+fn toHost(_ it: bind Interp, _ v: Value) -> HostValue {
+    match v {
+        .none -> { return .none }
+        .bool(b) -> { return .bool(b: b) }
+        .int(i) -> { return .int(i: i) }
+        .float(f) -> { return .float(f: f) }
+        .str(s) -> { return .str(s: s) }
+        .list(id) -> { return hostList(it, id) }
+        .tuple(id) -> { return hostList(it, id) }
+        .dict(id) -> {
+            var items: [HostValue] = []
+            let keys = dictKeys(it.dicts[id])
+            let vals = dictValues(it.dicts[id])
+            for i in keys.indices {
+                items.append(.list(items: [toHost(it, keys[i]), toHost(it, vals[i])]))
+            }
+            return .list(items: items)
+        }
+        .range(start, stop, step) -> {
+            var items: [HostValue] = []
+            var i = start
+            while (step > 0 && i < stop) || (step < 0 && i > stop) {
+                items.append(.int(i: i))
+                i += step
+            }
+            return .list(items: items)
+        }
+        _ -> { return .str(s: toStr(it, v)) }
+    }
+}
+
+fn fromHost(_ it: bind Interp, _ h: HostValue) -> Value {
+    match h {
+        .none -> { return Value.none }
+        .bool(b) -> { return .bool(b: b) }
+        .int(i) -> { return .int(i: i) }
+        .float(f) -> { return .float(f: f) }
+        .str(s) -> { return .str(s: s) }
+        .list(items) -> {
+            var out: [Value] = []
+            for item in items {
+                out.append(fromHost(it, item))
+            }
+            return it.newList(out)
+        }
+        .error(kind, message) -> { return it.throw(if it.classIds.contains(key: kind) { kind } else { "RuntimeError" }, message) }
+    }
+}
+
+// __host__(name, …): asks the program around for something.
+fn callHost(_ it: bind Interp, _ args: [Value]) -> Value {
+    var name = ""
+    match args.first ?? Value.none {
+        .str(s) -> { name = s }
+        _ -> { return it.throw("TypeError", "__host__() needs the name of what's asked for") }
+    }
+    var passed: [HostValue] = []
+    for i in 1..max(1, args.count) {
+        passed.append(toHost(it, args[i]))
+        if it.signal != .none {
+            return Value.none
+        }
+    }
+    let answer = it.host.call(name, passed)
+    fromHost(it, answer)
+}
+
+// ---- sessions ----
+
+// An interpreter kept by another program. Copying a session copies all
+// of its Python, so a copy can run something and be thrown away.
+public struct Session {
+    it: Interp
+}
+
+// How a run ended. `error` is empty when it went well; otherwise it's the
+// last line Python would print ("ValueError: no"), `line` is where in the
+// text that was run (0 if unknown), and `trace` the whole traceback.
+public struct RunResult {
+    ok: Bool = true
+    output: String = ""
+    error: String = ""
+    line: Int = 0
+    trace: String = ""
+    // What a called function returned.
+    value: HostValue = .none
+}
+
+// A function a session's Python defined: its parameters' names, and how
+// many of them have no default (so must be given).
+public struct FunctionInfo {
+    name: String = ""
+    params: [String] = []
+    required: Int = 0
+    variadic: Bool = false
+}
+
+// A new session. With `sandbox` (the default), the Python can't open
+// files, read the keyboard, use `os`, sleep, or import files from disk.
+public fn newSession(sandbox: Bool = true) -> Session {
+    var it = newInterp()
+    it.capture = true
+    it.sandbox = sandbox
+    it.scriptName = "<script>"
+    Session(it: it)
+}
+
+// Gives the session a module as text: `import name` then runs it.
+public fn addModule(_ s: bind Session, _ name: String, _ source: String) {
+    s.it.sources[name] = source
+}
+
+public fn setHost(_ s: bind Session, _ host: Host) {
+    s.it.host = host
+}
+
+// The host as it is now (changed by what the Python asked of it): cast
+// it back with `as?`.
+public fn hostOf(_ s: Session) -> Host {
+    s.it.host
+}
+
+// What ended a run: the exception that's raised, as text, forgotten.
+fn takeFailure(_ it: bind Interp, _ result: bind RunResult) {
+    let raised = it.exc
+    let lines = it.traceLines
+    let names = it.traceNames
+    it.signal = .none
+    it.exc = .none
+    var kind = "Exception"
+    match raised {
+        .instance(id) -> { kind = it.classes[it.instances[id].cls].name }
+        _ -> {}
+    }
+    var text = ""
+    if it.exiting {
+        // exit(): not an error.
+        it.exiting = false
+        reset(it)
+        return
+    }
+    text = toStr(it, raised)
+    it.signal = .none
+    it.exc = .none
+    var trace = ["Traceback (most recent call last):"]
+    var i = lines.count - 1
+    while i >= 0 {
+        trace.append("  File \"{it.scriptName}\", line {lines[i]}, in {names[i]}")
+        i -= 1
+    }
+    result.ok = false
+    result.error = if text == "" { kind } else { "{kind}: {text}" }
+    result.line = lines.first ?? it.line
+    trace.append(result.error)
+    result.trace = trace.joined(separator: "\n")
+    it.traceLines = []
+    it.traceNames = []
+    reset(it)
+}
+
+fn takeOutput(_ it: bind Interp) -> String {
+    let text = it.out.joined()
+    it.out = []
+    text
+}
+
+// Runs Python given as text, in the session's module: what it defines
+// stays. `budget` is how many statements and calls it may run (-1: no
+// limit). With `echo`, the value of an expression on its own is printed,
+// as at Python's prompt.
+public fn run(_ s: bind Session, _ source: String, budget: Int = -1, echo: Bool = false) -> RunResult {
+    var result = RunResult()
+    s.it.budget = budget
+    s.it.sourceLines = source.lines()
+    parseInto(s.it.prog, source + "\n")
+    if s.it.prog.error != "" {
+        result.ok = false
+        result.error = "SyntaxError: {s.it.prog.error}"
+        result.line = s.it.prog.errorLine
+        result.trace = "  File \"{s.it.scriptName}\", line {result.line}\n{result.error}"
+        return result
+    }
+    let body = s.it.prog.body
+    for statement in body {
+        var shown = false
+        if echo {
+            match s.it.prog.nodes[statement] {
+                .exprStmt(value) -> {
+                    s.it.line = s.it.prog.lines[statement]
+                    let v = s.it.eval(value)
+                    if s.it.signal == .none && v != Value.none {
+                        let text = toRepr(s.it, v)
+                        if s.it.signal == .none {
+                            emit(s.it, text + "\n", toError: false)
+                        }
+                    }
+                    shown = true
+                }
+                _ -> {}
+            }
+        }
+        if !shown {
+            s.it.exec(statement)
+        }
+        if s.it.signal != .none {
+            break
+        }
+    }
+    if s.it.signal != .none {
+        takeFailure(s.it, result)
+    }
+    s.it.budget = -1
+    result.output = takeOutput(s.it)
+    result
+}
+
+// The functions the session's Python has defined at its top level, in
+// the order of their names (those starting with `_` left out).
+public fn functions(_ s: Session) -> [FunctionInfo] {
+    var out: [FunctionInfo] = []
+    let vars = s.it.envs[1].vars
+    for name in vars.keys.sorted() {
+        if name.hasPrefix("_") {
+            continue
+        }
+        match vars[name] ?? Value.none {
+            .function(id) -> {
+                let def = s.it.prog.defs[s.it.closures[id].fnId]
+                var required = 0
+                for d in def.defaults {
+                    if d < 0 {
+                        required += 1
+                    }
+                }
+                out.append(FunctionInfo(name: name, params: def.params, required: required, variadic: def.varargs != ""))
+            }
+            _ -> {}
+        }
+    }
+    out
+}
+
+// Calls a function the session's Python defined, by name.
+public fn callFunction(_ s: bind Session, _ name: String, _ args: [HostValue], budget: Int = -1) -> RunResult {
+    var result = RunResult()
+    let f = s.it.envs[1].vars[name] ?? Value.absent
+    match f {
+        .function(id) -> {}
+        _ -> {
+            result.ok = false
+            result.error = "NameError: no function named '{name}'"
+            return result
+        }
+    }
+    s.it.budget = budget
+    var passed: [Value] = []
+    for a in args {
+        passed.append(fromHost(s.it, a))
+    }
+    var answer = Value.none
+    if s.it.signal == .none {
+        answer = s.it.callValue(f, passed, [], [])
+    }
+    if s.it.signal == .none {
+        result.value = toHost(s.it, answer)
+    }
+    if s.it.signal != .none {
+        takeFailure(s.it, result)
+    }
+    s.it.budget = -1
+    result.output = takeOutput(s.it)
+    result
+}

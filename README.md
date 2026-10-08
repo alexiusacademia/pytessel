@@ -69,6 +69,38 @@ prints for them, error messages included.
   `UnboundLocalError`.
 - **Speed:** about a fifth of CPython's on loops and calls.
 
+## Inside another program
+
+PyTessel can run inside a Tessel program, as a module. Copy every `.tsl`
+file except `main.tsl` into a folder of the program (say `python/`) and
+import it; `embed.tsl` is the way in:
+
+```
+import python
+
+var py = python.newSession()                 // in a sandbox, by default
+let r = python.run(py, "def double(x):\n    return x * 2\n")
+let c = python.callFunction(py, "double", [.int(i: 21)])   // c.value is .int(i: 42)
+```
+
+- **`run`** runs a text in the session (what it defines stays) and gives
+  back what it printed and, if it failed, the error, its line and the
+  traceback. **`callFunction`** calls a function the Python defined, with
+  `HostValue`s (none, bool, int, float, str, list). **`functions`** lists
+  them with their parameters.
+- **The sandbox** (on unless `newSession(sandbox: false)`): no `open`, no
+  `input`, no `os`, no `time.sleep`, no importing files from disk.
+- **`budget:`** on `run` and `callFunction` limits how many statements and
+  calls may run; past it the Python gets a `TimeoutError` it can't catch
+  its way out of.
+- **`addModule(session, name, source)`** gives the Python a module as text
+  for `import name`.
+- **The host:** a struct of the program that conforms to `python.Host`,
+  set with `setHost`, answers `__host__("name", …)` calls made in Python;
+  `hostOf(session) as? YourHost` gives it back with what it changed.
+- A `Session` is a value: copy it, run something in the copy, throw the
+  copy away.
+
 ## How it's made
 
 | File | |
@@ -82,6 +114,7 @@ prints for them, error messages included.
 | `builtins.tsl`, `methods.tsl` | The built-in functions, and the methods of `str`, `list`, `dict`, `set` and files. |
 | `format.tsl` | Format specs, `%` formatting and `str.format`. |
 | `modules.tsl` | `math`, `random`, `json` and the other modules, and importing files. |
+| `embed.tsl` | A new interpreter, and PyTessel inside another program: sessions, the sandbox, the host. |
 | `main.tsl` | Running a file, `-c`, and the prompt. |
 
 About 10,000 lines of Tessel. Every `.tsl` file in the folder is part of the

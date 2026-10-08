@@ -454,11 +454,7 @@ fn printValues(_ it: bind Interp, _ args: [Value], _ kwNames: [String], _ kwValu
     if it.signal != .none {
         return Value.none
     }
-    if toError {
-        printError(text, terminator: end)
-    } else {
-        print(text, terminator: end)
-    }
+    emit(it, text + end, toError: toError)
     Value.none
 }
 
@@ -541,7 +537,11 @@ fn runSource(_ it: bind Interp, _ source: String, _ asExpression: Bool) -> Value
 }
 
 fn callBuiltin(_ it: bind Interp, _ name: String, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
+    if it.sandbox && name == "open" {
+        return it.throw("PermissionError", "{name}() isn't available here")
+    }
     match name {
+        "__host__" -> callHost(it, args)
         "len" -> {
             if !arity(it, name, args, 1, 1) {
                 return Value.none
@@ -865,8 +865,11 @@ fn callBuiltin(_ it: bind Interp, _ name: String, _ args: [Value], _ kwNames: [S
             Value.bool(b: args[0] == args[1])
         }
         "input" -> {
+            if it.sandbox {
+                return it.throw("PermissionError", "input() isn't available here")
+            }
             if !args.isEmpty {
-                print(toStr(it, args[0]), terminator: "")
+                emit(it, toStr(it, args[0]), toError: false)
             }
             if let text = readLine() {
                 return .str(s: text)
@@ -1155,7 +1158,7 @@ fn callBuiltin(_ it: bind Interp, _ name: String, _ args: [Value], _ kwNames: [S
                 match args[0] {
                     .none -> {}
                     .str(s) -> {
-                        printError(s)
+                        emit(it, s + "\n", toError: true)
                         code = 1
                     }
                     _ -> { code = intOf(args[0]) ?? 1 }
@@ -1311,7 +1314,7 @@ fn builtinNames() -> [String] {
      "abs", "min", "max", "sum", "sorted", "enumerate", "zip", "map", "filter", "reversed", "any", "all", "repr",
      "ascii", "type", "issubclass", "input", "ord", "chr", "round", "divmod", "pow", "hex", "bin", "oct", "callable",
      "getattr", "hasattr", "setattr", "delattr", "iter", "next", "open", "super", "staticmethod", "classmethod",
-     "property", "exit", "quit", "id", "hash", "format", "vars", "globals", "locals", "dir", "eval", "exec"]
+     "property", "exit", "quit", "id", "hash", "format", "vars", "globals", "locals", "dir", "eval", "exec", "__host__"]
 }
 
 // The built-in exceptions, each with the one it's a kind of.
@@ -1324,6 +1327,7 @@ fn exceptionClasses() -> [(String, String)] {
      ("NameError", "Exception"), ("UnboundLocalError", "NameError"), ("OSError", "Exception"),
      ("FileNotFoundError", "OSError"), ("FileExistsError", "OSError"), ("PermissionError", "OSError"),
      ("RuntimeError", "Exception"), ("NotImplementedError", "RuntimeError"), ("RecursionError", "RuntimeError"),
+     ("TimeoutError", "OSError"),
      ("StopIteration", "Exception"), ("SyntaxError", "Exception"), ("TypeError", "Exception"),
      ("ValueError", "Exception"), ("UnicodeError", "ValueError")]
 }
