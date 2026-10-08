@@ -771,6 +771,22 @@ fn objectMethod(_ it: bind Interp, _ type: String, _ name: String, _ args: [Valu
                 return it.throw("TypeError", "descriptor '__call__' of 'type' object needs an argument")
             }
             "__init__" -> { return Value.none }
+            "__setattr__" -> {
+                // The class's attribute, set without asking its metaclass.
+                if args.count == 3 {
+                    match args[1] {
+                        .str(attribute) -> {
+                            let was = it.settingClass
+                            it.settingClass = true
+                            setAttr(it, args[0], attribute, args[2])
+                            it.settingClass = was
+                            return Value.none
+                        }
+                        _ -> {}
+                    }
+                }
+                return it.throw("TypeError", "type.__setattr__() takes a class, a name and a value")
+            }
             "__subclasses__" -> {
                 var out: [Value] = []
                 if !args.isEmpty {

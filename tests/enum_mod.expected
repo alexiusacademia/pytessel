@@ -1,0 +1,30 @@
+Color.RED <Color.RED: 1> Color.GREEN BLUE 3
+[<Color.RED: 1>, <Color.GREEN: 2>, <Color.BLUE: 3>] 3 ['RED', 'GREEN', 'BLUE'] [3, 2, 1]
+Color.RED Color.BLUE Color.GREEN True True
+True False True False True
+red is number 1 True Color.GREEN 3 True
+True True True EnumType
+b 2 ['BLUE', 'RED']
+['RED', 'GREEN', 'BLUE'] True RED RED=1
+ValueError: 7 is not a valid Color
+KeyError: 'PURPLE'
+TypeError: '<' not supported between instances of 'Color' and 'Color'
+AttributeError: cannot reassign member 'RED'
+Color.RED
+TypeError: <enum 'More'> cannot extend <enum 'Color'>
+['stop', 'go', 'wait']
+[<Weekday.MON: 1>, <Weekday.TUE: 2>, <Weekday.WED: 3>] 3 True WED ['MON', 'TUE', 'WED', 'MIDWEEK']
+Weekday.TUE 3 True
+5.976e+24 2439700.0 EARTH
+Text.A B ['a', 'b']
+ON! [<Signal.ON: 1>, <Signal.OFF: 0>] Signal.OFF
+True True True 2 10 9 10
+[<Level.LOW: 1>, <Level.MID: 5>, <Level.HIGH: 10>] 10 <Level.MID: 5> 5 5 10
+5 True 2 five [1, 2, 3, 4]
+False True True 16 True 2 1
+Perm.R|W <Perm.R|W: 6> 6 True False Perm.R False True
+[<Perm.R: 4>, <Perm.W: 2>] Perm.R|W|X Perm(0) Perm.W|X Perm.W Perm.R
+[1, 2, 4] Bits.A|C 5
+[<Fine.ONE: 1>, <Fine.TWO: 2>]
+ValueError: duplicate values found in <enum 'Twice'>: UNO -> ONE
+True True

@@ -121,6 +121,23 @@ fn specialCall(_ it: bind Interp, _ o: Value, _ name: String, _ args: [Value]) -
     nil
 }
 
+// The whole number a value is: an int, or an object with `__index__`.
+fn indexOf(_ it: bind Interp, _ v: Value) -> Int? {
+    if let i = intOf(v) {
+        return i
+    }
+    match v {
+        .instance(id) -> {
+            let method = classAttr(it, it.instances[id].cls, "__index__")
+            if method != Value.absent {
+                return intOf(it.callValue(method, [v], [], []))
+            }
+        }
+        _ -> {}
+    }
+    nil
+}
+
 // ---- exec and eval in a namespace ----
 
 // exec(source, globals, locals) and eval(…): the code runs with the

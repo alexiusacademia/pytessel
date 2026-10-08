@@ -416,7 +416,11 @@ fn percentFormat(_ it: bind Interp, _ format: String, _ values: Value) -> String
                     _ -> {
                         if let n = intOf(value) {
                             whole = n
+                        } else if let n = intOf(toInt(it, [value])) {
+                            // (An object that says what whole number it is.)
+                            whole = n
                         } else {
+                            it.signal = .none
                             it.throw("TypeError", "%{kind} format: a real number is required, not {typeName(it, value)}")
                             return ""
                         }

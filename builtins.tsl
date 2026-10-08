@@ -615,7 +615,7 @@ fn callBuiltin(_ it: bind Interp, _ name: String, _ args: [Value], _ kwNames: [S
             }
             var numbers: [Int] = []
             for a in args {
-                if let i = intOf(a) {
+                if let i = indexOf(it, a) {
                     numbers.append(i)
                 } else {
                     return it.throw("TypeError", "'{typeName(it, a)}' object cannot be interpreted as an integer")

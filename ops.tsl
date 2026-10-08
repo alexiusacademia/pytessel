@@ -963,7 +963,13 @@ fn hashKey(_ it: bind Interp, _ v: Value) -> String {
                 match r {
                     .int(h) -> {
                         if let text = it.hashTexts[h] {
-                            return text
+                            if text.hasPrefix("t") {
+                                return text
+                            }
+                        }
+                        // (And one that's a whole number, as that number.)
+                        if classAttr(it, it.instances[id].cls, "__index__") != Value.absent {
+                            return "i{h}"
                         }
                     }
                     _ -> {}
@@ -1551,6 +1557,15 @@ fn unaryOp(_ it: bind Interp, _ op: UnOp, _ v: Value) -> Value {
             it.throw("TypeError", "bad operand type for unary +: '{typeName(it, v)}'")
         }
         .invert -> {
+            match v {
+                .instance(id) -> {
+                    let method = classAttr(it, it.instances[id].cls, "__invert__")
+                    if method != Value.absent {
+                        return it.callValue(method, [v], [], [])
+                    }
+                }
+                _ -> {}
+            }
             if let i = intOf(v) {
                 return .int(i: ~i)
             }
