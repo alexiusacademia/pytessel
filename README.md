@@ -33,7 +33,13 @@ prints for them, error messages included.
   augmented assignment, `del`, `assert`, `pass`, `global`, `nonlocal`,
   `with`, `try`/`except`/`else`/`finally`, `raise`.
 - **Functions:** defaults, `*args`, `**kwargs`, keyword arguments, closures,
-  `lambda`, decorators, recursion, generators (see below).
+  `lambda`, decorators, recursion.
+- **Generators:** a function with `yield` runs up to its next `yield` each
+  time it's asked for a value, so one that never ends (`while True: yield
+  …`) is fine; `send`, `throw`, `close`, `yield from` and generator
+  expressions. `map`, `filter`, `zip`, `enumerate`, `reversed` and `iter` give
+  a value at a time too, and so do your own classes with `__iter__` and
+  `__next__`.
 - **Classes:** inheritance (several bases too), `super()`, properties with
   setters, `staticmethod`, `classmethod`, and the special methods: `__init__`,
   `__repr__`, `__str__`, `__eq__`, `__lt__`, `__add__` and the other
@@ -55,12 +61,18 @@ prints for them, error messages included.
 
 - **Integers are 64-bit.** Python's grow without limit; PyTessel raises
   `OverflowError` where a result doesn't fit (`2 ** 100`).
-- **Generators run all at once.** Calling a function with `yield` runs it to
-  its end and keeps what it yielded, so a generator that never ends (`while
-  True: yield …`) never returns. `map`, `zip`, `filter` and `enumerate` work
-  the same way.
+- **`yield` inside a larger expression.** `yield` is understood where it's
+  nearly always written: as a statement (`yield v`, `yield from g`) or as
+  the whole right side of an assignment or a `return` (`x = yield v`,
+  `x += yield v`, `x = yield from g`, `return (yield v)`). Anywhere else
+  (`print((yield))`, `if (yield v):`, `[(yield a), (yield b)]`) it raises a
+  `SyntaxError` when the generator gets there.
 - **Nothing is ever freed.** PyTessel has no garbage collector: a program that
-  makes millions of lists or objects uses more and more memory.
+  makes millions of lists or objects uses more and more memory. And a
+  generator that's dropped half way doesn't run its `finally` blocks, as
+  Python does when it frees one: only `close()` does, or leaving (`break`,
+  `return`) a `for` loop that called the generator function itself
+  (`for x in lines(): … break`).
 - **Not there:** `async`, `match`, `bytes`, complex numbers, `slice`
   objects, metaclasses, `__slots__`, descriptors of your own, and most of
   the standard library (`collections`, `itertools`, `re`, `datetime`, …).
@@ -110,14 +122,29 @@ let c = python.callFunction(py, "double", [.int(i: 21)])   // c.value is .int(i:
 | `parser.tsl` | A recursive descent parser: a method for each level of Python's grammar. |
 | `values.tsl` | Python's values. Lists, dictionaries and objects are shared, not copied, so they live in lists of the interpreter and a value says which one it is. |
 | `interp.tsl` | The evaluator: `eval` for expressions, `exec` for statements, calls, and the `signal` that carries `break`, `return` and exceptions outwards. |
-| `ops.tsl` | Arithmetic, comparison, `repr`, hashing, attributes, indexing, iteration, classes. |
+| `iterators.tsl` | Iteration, a value at a time: `getIter` and `nextValue`, which every loop and every `zip`, `map`, `next`, `in`, … goes through, and generator expressions. |
+| `generators.tsl` | Generators (see below). |
+| `ops.tsl` | Arithmetic, comparison, `repr`, hashing, attributes, indexing, classes. |
 | `builtins.tsl`, `methods.tsl` | The built-in functions, and the methods of `str`, `list`, `dict`, `set` and files. |
 | `format.tsl` | Format specs, `%` formatting and `str.format`. |
 | `modules.tsl` | `math`, `random`, `json` and the other modules, and importing files. |
 | `embed.tsl` | A new interpreter, and PyTessel inside another program: sessions, the sandbox, the host. |
 | `main.tsl` | Running a file, `-c`, and the prompt. |
 
-About 10,000 lines of Tessel. Every `.tsl` file in the folder is part of the
+**Generators.** The evaluator runs a statement by calling itself for the
+statements inside it, and a call can't be left half way and gone back into
+later. So a generator's body runs another way. The parser marks every
+statement that has a `yield` somewhere inside it. A generator keeps its own
+variables and a stack of frames, one for each block it's inside of (the
+function's body, a loop's, a `try`'s, a `with`'s), each with how far it has
+got, the loop's iterator, or what was on its way out when a `finally` began.
+A statement with no `yield` in it is run whole by the evaluator, as anywhere
+else; a marked one is opened into a frame of its own; and at the `yield`
+itself the generator stops, and gives the value. The next `next` or `send`
+goes on from the frames as they were left: what's sent becomes the `yield`'s
+value, and `throw` and `close` raise an exception there instead.
+
+About 12,000 lines of Tessel. Every `.tsl` file in the folder is part of the
 program; `tessel.toml` says which version of Tessel builds it.
 
 ## Tests

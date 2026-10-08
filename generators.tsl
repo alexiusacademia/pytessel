@@ -869,7 +869,7 @@ fn generatorMethod(_ it: bind Interp, _ id: Int, _ name: String, _ args: [Value]
     it.stopValue = .none
     if name == "send" {
         if args.count != 1 {
-            return it.throw("TypeError", "send() takes exactly one argument ({args.count} given)")
+            return it.throw("TypeError", "generator.send() takes exactly one argument ({args.count} given)")
         }
         if mode == IterMode.genexpr {
             // (It has no `yield` to give the value to.)
