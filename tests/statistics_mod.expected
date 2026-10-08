@@ -23,6 +23,10 @@ mean text TypeError: can't convert type 'str' to numerator/denominator
 0.3333333333333333
 float
 fmean empty StatisticsError: fmean requires at least one data point
+36.0 4.0 2.828427125
+geometric_mean empty StatisticsError: geometric mean requires a non-empty dataset containing positive numbers
+geometric_mean zero StatisticsError: geometric mean requires a non-empty dataset containing positive numbers
+geometric_mean negative StatisticsError: geometric mean requires a non-empty dataset containing positive numbers
 3
 4.0
 3

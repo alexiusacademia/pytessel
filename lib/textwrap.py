@@ -98,6 +98,8 @@ _sentence_end_re = re.compile(r"[a-z][\.\!\?][\"\']?\Z")
 class TextWrapper:
     """Wraps text: wrap() gives the lines, fill() the lines as one text."""
 
+    __module__ = "textwrap"
+
     def __init__(self, width=70, initial_indent="", subsequent_indent="", expand_tabs=True,
                  replace_whitespace=True, fix_sentence_endings=False, break_long_words=True,
                  drop_whitespace=True, break_on_hyphens=True, tabsize=8, max_lines=None,

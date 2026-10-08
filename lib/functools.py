@@ -37,6 +37,8 @@ def wraps(wrapped, assigned=WRAPPER_ASSIGNMENTS, updated=WRAPPER_UPDATES):
 class partial:
     """A function with some of its arguments already given."""
 
+    __module__ = "functools"
+
     def __init__(self, *args, **keywords):
         if not args:
             raise TypeError("type 'partial' takes at least one argument")

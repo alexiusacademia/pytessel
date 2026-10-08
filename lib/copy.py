@@ -6,7 +6,7 @@ import _pytessel
 
 
 class Error(Exception):
-    pass
+    __module__ = "copy"
 
 
 error = Error

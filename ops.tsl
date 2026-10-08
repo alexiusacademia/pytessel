@@ -354,6 +354,9 @@ fn toRepr(_ it: bind Interp, _ v: Value) -> String {
         .klass(id) -> {
             if it.classIds[it.classes[id].name] == id {
                 "<class '{it.classes[id].name}'>"
+            } else if let home = it.classes[id].attrs["__module__"] {
+                // (A class that says what module it's of: collections.Counter.)
+                "<class '{toStr(it, home)}.{it.classes[id].name}'>"
             } else {
                 "<class '__main__.{it.classes[id].name}'>"
             }

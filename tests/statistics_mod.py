@@ -11,7 +11,8 @@ def attempt(label, function, *args):
     try:
         print(label, function(*args))
     except StatisticsError as e:
-        print(label, "StatisticsError:", e)
+        # (One message has two spaces together in some versions of Python.)
+        print(label, "StatisticsError:", " ".join(str(e).split()))
     except TypeError as e:
         print(label, "TypeError:", e)
 
@@ -44,6 +45,12 @@ print(fmean(range(10)))
 print(fmean([1e16, 1.0, -1e16]))
 print(type(fmean([2, 2])).__name__)
 attempt("fmean empty", fmean, [])
+
+# ---- geometric_mean ----
+print(round(statistics.geometric_mean([54, 24, 36]), 9), statistics.geometric_mean([4.0]), round(statistics.geometric_mean([1, 2, 4, 8]), 9))
+attempt("geometric_mean empty", statistics.geometric_mean, [])
+attempt("geometric_mean zero", statistics.geometric_mean, [1, 0])
+attempt("geometric_mean negative", statistics.geometric_mean, [1, -2])
 
 # ---- median ----
 print(median([1, 3, 5]))

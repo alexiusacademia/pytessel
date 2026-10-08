@@ -55,7 +55,7 @@ fn reportException(_ it: bind Interp) {
     }
     var kind = "Exception"
     match raised {
-        .instance(id) -> { kind = it.classes[it.instances[id].cls].name }
+        .instance(id) -> { kind = exceptionKind(it, id) }
         _ -> {}
     }
     let text = toStr(it, raised)

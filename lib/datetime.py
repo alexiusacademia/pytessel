@@ -312,6 +312,8 @@ def _td_part(value, name):
 class timedelta:
     """The time between two moments: days, seconds and microseconds."""
 
+    __module__ = "datetime"
+
     def __init__(self, days=0, seconds=0, microseconds=0, milliseconds=0, minutes=0, hours=0, weeks=0):
         d = 0
         s = 0
@@ -334,17 +336,24 @@ class timedelta:
         whole, rest = _td_part(seconds, "seconds")
         s += whole
         fs += rest
-        whole, rest = _td_part(milliseconds, "milliseconds")
-        us += whole * 1000
-        fus += rest * 1000.0
-        whole, rest = _td_part(microseconds, "microseconds")
-        us += whole
-        fus += rest
+        # (A float of microseconds is rounded as a whole, with the rest.)
+        if isinstance(milliseconds, float):
+            _td_part(milliseconds, "milliseconds")
+            fus += milliseconds * 1000.0
+        else:
+            us += _td_part(milliseconds, "milliseconds")[0] * 1000
+        if isinstance(microseconds, float):
+            _td_part(microseconds, "microseconds")
+            fus += microseconds
+        else:
+            us += _td_part(microseconds, "microseconds")[0]
         if fs != 0.0:
             whole = int(fs)
             s += whole
             fus += (fs - whole) * 1000000.0
         if fus != 0.0:
+            if abs(fus) > 8.0e18:
+                raise OverflowError("Python int too large to convert to C int")
             us += round(fus)
         carry, us = divmod(us, 1000000)
         s += carry
@@ -643,6 +652,8 @@ def _parse_isoformat_time(text):
 class date:
     """A day of the calendar: date(2024, 5, 17)."""
 
+    __module__ = "datetime"
+
     def __init__(self, year, month, day):
         year, month, day = _check_date_fields(year, month, day)
         self._year = year
@@ -845,6 +856,8 @@ date.resolution = timedelta(days=1)
 class tzinfo:
     """A time zone: a class of your own says what utcoffset(), tzname() and dst() are."""
 
+    __module__ = "datetime"
+
     def tzname(self, dt):
         raise NotImplementedError("a tzinfo subclass must implement tzname()")
 
@@ -877,9 +890,11 @@ class tzinfo:
 class timezone(tzinfo):
     """A time zone that's always the same distance from UTC."""
 
+    __module__ = "datetime"
+
     def __init__(self, offset, name=None):
         if not isinstance(offset, timedelta):
-            raise TypeError("offset must be a timedelta")
+            raise TypeError("timezone() argument 1 must be datetime.timedelta, not %s" % type(offset).__name__)
         if name is not None and not isinstance(name, str):
             raise TypeError("name must be a string")
         if not (timedelta(days=-1) < offset and offset < timedelta(days=1)):
@@ -947,6 +962,8 @@ UTC = timezone.utc
 
 class time:
     """A time of day: time(13, 30)."""
+
+    __module__ = "datetime"
 
     def __init__(self, hour=0, minute=0, second=0, microsecond=0, tzinfo=None, fold=0):
         hour, minute, second, microsecond, fold = _check_time_fields(hour, minute, second, microsecond, fold)
@@ -1030,10 +1047,10 @@ class time:
 
     def __hash__(self):
         off = self.utcoffset()
-        if not off:
+        if off is None:
             return hash(("time", self._hour, self._minute, self._second, self._microsecond))
         seconds = self._hour * 3600 + self._minute * 60 + self._second - (off.days * 86400 + off.seconds)
-        return hash(("time", seconds, self._microsecond))
+        return hash(("time at", seconds % 86400, self._microsecond))
 
     def __add__(self, other):
         raise _unsupported("+", self, other)
@@ -1124,6 +1141,8 @@ time.resolution = timedelta(microseconds=1)
 
 class datetime(date):
     """A moment: a date and a time of day. datetime(2024, 5, 17, 13, 30)."""
+
+    __module__ = "datetime"
 
     def __init__(self, year, month, day, hour=0, minute=0, second=0, microsecond=0, tzinfo=None, fold=0):
         year, month, day = _check_date_fields(year, month, day)
@@ -1508,7 +1527,7 @@ class datetime(date):
 
     def __hash__(self):
         off = self.utcoffset()
-        if not off:
+        if off is None:
             return hash(("datetime", self._year, self._month, self._day, self._hour, self._minute, self._second,
                          self._microsecond))
         seconds = self._hour * 3600 + self._minute * 60 + self._second

@@ -139,4 +139,7 @@ KeyError 'nope'
 KeyError "Key not found in the first mapping: 'color'"
 ann guest {} 1 {'k': 1}
 2 1 False 1 ['x', 'y']
+Tally({'a': 3, 'n': 2, 'b': 1}) a 2 Tally({'a': 3, 'n': 2, 'b': 1}) Tally True Tally() Counter({'a': 4, 'n': 2, 'b': 1})
+Registry(<class 'list'>, {}) Registry(<class 'int'>, {'a': 1}) History([1, 2, 3], maxlen=5) 3 History([1, 2, 3], maxlen=5) History Settings([('a', 1)]) Settings()
+<class 'collections.Counter'> <class 'collections.defaultdict'> <class 'collections.OrderedDict'> <class 'collections.deque'> <class 'collections.ChainMap'> <class '__main__.Tally'> <class 'collections.Counter'> <class 'collections.deque'>
 True []

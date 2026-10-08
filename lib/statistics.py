@@ -12,10 +12,10 @@ import math
 
 
 class StatisticsError(ValueError):
-    pass
+    __module__ = "statistics"
 
 
-def _numbers(data, what):
+def _numbers(data):
     # The data as a list, checked. Gives (values, whether all are ints).
     values = list(data)
     whole = True
@@ -62,7 +62,7 @@ def _divide(terms, n):
 
 def mean(data):
     """The arithmetic mean: the sum divided by how many there are."""
-    values, whole = _numbers(data, "mean")
+    values, whole = _numbers(data)
     n = len(values)
     if n < 1:
         raise StatisticsError("mean requires at least one data point")
@@ -91,23 +91,6 @@ def geometric_mean(data):
             raise StatisticsError("geometric mean requires a non-empty dataset containing positive numbers")
         logs.append(math.log(x))
     return math.exp(math.fsum(logs) / len(logs))
-
-
-def harmonic_mean(data):
-    """How many numbers there are, divided by the sum of 1/x for each."""
-    values, whole = _numbers(data, "harmonic_mean")
-    n = len(values)
-    if n < 1:
-        raise StatisticsError("harmonic_mean requires at least one data point")
-    for x in values:
-        if x < 0:
-            raise StatisticsError("harmonic mean does not support negative values")
-    if n == 1:
-        return values[0]
-    for x in values:
-        if x == 0:
-            return 0
-    return n / math.fsum([1 / x for x in values])
 
 
 def median(data):
@@ -195,7 +178,7 @@ def _ss(values, whole, c):
 
 def variance(data, xbar=None):
     """The sample variance: for data that's a sample of something larger."""
-    values, whole = _numbers(data, "variance")
+    values, whole = _numbers(data)
     n = len(values)
     if n < 2:
         raise StatisticsError("variance requires at least two data points")
@@ -207,7 +190,7 @@ def variance(data, xbar=None):
 
 def pvariance(data, mu=None):
     """The population variance: for data that's the whole of something."""
-    values, whole = _numbers(data, "pvariance")
+    values, whole = _numbers(data)
     n = len(values)
     if n < 1:
         raise StatisticsError("pvariance requires at least one data point")

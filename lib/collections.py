@@ -105,6 +105,8 @@ def _by_count(item):
 class Counter(_DictLike):
     """Counts things: Counter("hello")["l"] is 2, and a missing key counts 0."""
 
+    __module__ = "collections"
+
     def __init__(self, iterable=None, **kwds):
         self._d = {}
         self.update(iterable, **kwds)
@@ -118,9 +120,10 @@ class Counter(_DictLike):
             del self._d[key]
 
     def __repr__(self):
+        name = type(self).__name__
         if not self._d:
-            return "Counter()"
-        return "Counter({%s})" % ", ".join(["%r: %r" % pair for pair in self.most_common()])
+            return name + "()"
+        return "%s({%s})" % (name, ", ".join(["%r: %r" % pair for pair in self.most_common()]))
 
     def total(self):
         """The sum of the counts."""
@@ -166,7 +169,7 @@ class Counter(_DictLike):
             d[element] = d.get(element, 0) - kwds[element]
 
     def copy(self):
-        return Counter(self)
+        return type(self)(self)
 
     @classmethod
     def fromkeys(cls, iterable, v=None):
@@ -279,6 +282,8 @@ class Counter(_DictLike):
 class defaultdict(_DictLike):
     """A dict that makes a value, with default_factory(), for a key it hasn't got."""
 
+    __module__ = "collections"
+
     def __init__(self, default_factory=None, *args, **kwargs):
         if default_factory is not None and not callable(default_factory):
             raise TypeError("first argument must be callable or None")
@@ -300,10 +305,10 @@ class defaultdict(_DictLike):
         return value
 
     def __repr__(self):
-        return "defaultdict(%r, %r)" % (self.default_factory, self._d)
+        return "%s(%r, %r)" % (type(self).__name__, self.default_factory, self._d)
 
     def copy(self):
-        return defaultdict(self.default_factory, self._d)
+        return type(self)(self.default_factory, self._d)
 
 
 # ---- OrderedDict ----
@@ -311,14 +316,17 @@ class defaultdict(_DictLike):
 class OrderedDict(_DictLike):
     """A dict that can move its keys about: move_to_end(), popitem(last=False)."""
 
+    __module__ = "collections"
+
     def __init__(self, *args, **kwargs):
         self._d = {}
         self.update(*args, **kwargs)
 
     def __repr__(self):
+        name = type(self).__name__
         if not self._d:
-            return "OrderedDict()"
-        return "OrderedDict(%r)" % (list(self._d.items()),)
+            return name + "()"
+        return "%s(%r)" % (name, list(self._d.items()))
 
     def __eq__(self, other):
         if isinstance(other, OrderedDict):
@@ -354,7 +362,7 @@ class OrderedDict(_DictLike):
         return (key, self._d.pop(key))
 
     def copy(self):
-        return OrderedDict(self._d)
+        return type(self)(self._d)
 
     @classmethod
     def fromkeys(cls, iterable, value=None):
@@ -368,6 +376,8 @@ class OrderedDict(_DictLike):
 
 class deque:
     """A list that's quick to add to and take from at both ends."""
+
+    __module__ = "collections"
 
     def __init__(self, iterable=(), maxlen=None):
         if maxlen is not None:
@@ -404,9 +414,10 @@ class deque:
         return value in self._pack()
 
     def __repr__(self):
+        name = type(self).__name__
         if self.maxlen is None:
-            return "deque(%r)" % (self._pack(),)
-        return "deque(%r, maxlen=%d)" % (self._pack(), self.maxlen)
+            return "%s(%r)" % (name, self._pack())
+        return "%s(%r, maxlen=%d)" % (name, self._pack(), self.maxlen)
 
     def __eq__(self, other):
         return isinstance(other, deque) and self._pack() == other._pack()
@@ -534,7 +545,7 @@ class deque:
         self._head = 0
 
     def copy(self):
-        return deque(self, self.maxlen)
+        return type(self)(self, self.maxlen)
 
     def count(self, x):
         return self._pack().count(x)
@@ -792,6 +803,8 @@ def namedtuple(typename, field_names, rename=False, defaults=None, module=None):
 class ChainMap:
     """Several mappings seen as one: a key is looked for in each in turn."""
 
+    __module__ = "collections"
+
     def __init__(self, *maps):
         self.maps = list(maps) or [{}]
 
@@ -833,7 +846,7 @@ class ChainMap:
         return False
 
     def __repr__(self):
-        return "ChainMap(%s)" % ", ".join([repr(m) for m in self.maps])
+        return "%s(%s)" % (type(self).__name__, ", ".join([repr(m) for m in self.maps]))
 
     def __eq__(self, other):
         if isinstance(other, ChainMap):

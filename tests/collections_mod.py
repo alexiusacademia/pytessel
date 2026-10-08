@@ -386,5 +386,30 @@ inner["x"] = 2
 inner["y"] = 3
 print(inner["x"], scopes["x"], "y" in scopes, inner.parents["x"], list(inner))
 
+# ---- classes of one's own made from them ----
+class Tally(Counter):
+    def top(self):
+        return self.most_common(1)[0][0]
+
+
+class Registry(defaultdict):
+    pass
+
+
+class History(deque):
+    def latest(self):
+        return self[-1]
+
+
+class Settings(OrderedDict):
+    pass
+
+
+t = Tally("banana")
+h = History([1, 2, 3], maxlen=5)
+print(t, t.top(), t["n"], t.copy(), type(t.copy()).__name__, isinstance(t, Counter), Tally(), t + Tally("a"))
+print(Registry(list), Registry(int, a=1), h, h.latest(), h.copy(), type(h.copy()).__name__, Settings(a=1), Settings())
+print(Counter, defaultdict, OrderedDict, deque, ChainMap, type(t), type(Counter()), type(deque()))
+
 # What the module has.
 print(collections.Counter is Counter, [name for name in ["Counter", "defaultdict", "OrderedDict", "deque", "namedtuple", "ChainMap"] if not hasattr(collections, name)])

@@ -22,7 +22,7 @@ fn moduleFunctions(_ m: String) -> [String] {
         "os.path" -> ["exists", "isfile", "isdir", "join", "basename", "dirname", "splitext", "abspath"]
         "json" -> ["dumps", "loads"]
         "_functools" -> ["reduce"]
-        "_re" -> ["compile", "match", "scan"]
+        "_re" -> ["compile", "match", "scan", "text", "cut"]
         "_pytessel" -> ["new_instance", "utc_offset"]
         _ -> []
     }
@@ -126,8 +126,10 @@ fn importModule(_ it: bind Interp, _ name: String) -> Value {
     if text == nil && !it.sandbox {
         text = readFile(path: joinPath(it.scriptDir, name.replace(".", with: "/") + ".py"))
     }
+    var bundled = false
     if text == nil {
         text = bundledModule(name)
+        bundled = text != nil
     }
     if let source = text {
         parseInto(it.prog, source)
@@ -143,7 +145,16 @@ fn importModule(_ it: bind Interp, _ name: String) -> Value {
         let savedName = it.funcName
         it.env = e
         it.funcName = "<module>"
+        // Setting up one of PyTessel's own modules isn't the script's
+        // work: it doesn't count against the script's budget.
+        let savedBudget = it.budget
+        if bundled && savedBudget > 0 {
+            it.budget = -1
+        }
         it.execBlock(body)
+        if bundled && savedBudget > 0 && it.budget < 0 {
+            it.budget = savedBudget
+        }
         it.env = savedEnv
         it.funcName = savedName
         if it.signal != .none {
@@ -153,6 +164,21 @@ fn importModule(_ it: bind Interp, _ name: String) -> Value {
         return .module(name: name)
     }
     it.throw("ModuleNotFoundError", "No module named '{name}'")
+}
+
+// An exception's class as a traceback's last line names it: with its
+// module, for the classes of the bundled modules (they say which in
+// `__module__`): `re.error`, `statistics.StatisticsError`.
+fn exceptionKind(_ it: bind Interp, _ id: Int) -> String {
+    let cls = it.instances[id].cls
+    let name = it.classes[cls].name
+    if let home = it.classes[cls].attrs["__module__"] {
+        match home {
+            .str(s) -> { return s + "." + name }
+            _ -> {}
+        }
+    }
+    name
 }
 
 // from module import *

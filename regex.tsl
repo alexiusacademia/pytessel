@@ -72,6 +72,7 @@ struct RxProgram {
 struct RxStore {
     programs: [RxProgram] = []
     text: String = ""
+    chars: [String] = []
     codes: [Int] = []
     lower: [Int] = []
     upper: [Int] = []
@@ -480,6 +481,15 @@ struct RxParser {
         pos += 1
     }
 
+    // What a group that isn't kept is, in the tree: its body. (A lone ^ or
+    // \b is wrapped, so that (?:^)* isn't taken for ^*, which is an error.)
+    fn grouped(_ body: Int) -> Int {
+        match nodes[body] {
+            .assert(_) -> { return add(.seq(items: [body])) }
+            _ -> { return body }
+        }
+    }
+
     // ( … ) and every (? … ).
     fn group() -> Int {
         let start = pos
@@ -495,7 +505,7 @@ struct RxParser {
             if ch == ":" {
                 let body = alternatives()
                 closeGroup(start)
-                return body
+                return grouped(body)
             }
             if ch == "P" {
                 if pos >= c.count {
@@ -620,7 +630,7 @@ struct RxParser {
                     let body = alternatives()
                     flags = saved
                     closeGroup(start)
-                    return body
+                    return grouped(body)
                 }
                 fail("unknown flag", pos)
                 return -1
@@ -647,7 +657,12 @@ struct RxParser {
             fail("incomplete escape {c.slice(from: at, to: pos).joined()}", at)
             return 0
         }
-        hexValue(text)
+        let value = hexValue(text)
+        if value > 0x10FFFF {
+            fail("bad escape {c.slice(from: at, to: pos).joined()}", at)
+            return 0
+        }
+        value
     }
 
     fn isOctal(_ ch: String) -> Bool {
@@ -667,6 +682,21 @@ struct RxParser {
             "x" -> { return hexEscape(2, at) }
             "u" -> { return hexEscape(4, at) }
             "U" -> { return hexEscape(8, at) }
+            "N" -> {
+                // \N{name}: PyTessel doesn't know characters' names.
+                if pos >= c.count || c[pos] != "\{" {
+                    fail("missing \{", pos)
+                    return 0
+                }
+                var name = ""
+                pos += 1
+                while pos < c.count && c[pos] != "\}" {
+                    name += c[pos]
+                    pos += 1
+                }
+                fail("undefined character name {strRepr(name)}", at)
+                return 0
+            }
             _ -> {}
         }
         if isDigitChar(e) {
@@ -976,6 +1006,9 @@ struct RxCompiler {
                 if least > 0 {
                     for _ in 0..least {
                         emit(body)
+                        if error != "" {
+                            return
+                        }
                     }
                 }
                 if most < 0 {
@@ -1009,15 +1042,30 @@ struct RxCompiler {
                     }
                 } else if most > least {
                     // Up to `most - least` more, each one optional.
+                    // (After a turn that matched nothing, no more are tried.)
                     var splits: [Int] = []
+                    var checks: [Int] = []
+                    let careful = canBeEmpty(body)
                     for _ in 0..(most - least) {
                         splits.append(put(6, 0, 0))
+                        var register = -1
+                        if careful {
+                            register = prog.registers
+                            prog.registers += 1
+                            put(23, register, 0)
+                        }
                         emit(body)
                         if error != "" {
                             return
                         }
+                        if careful {
+                            checks.append(put(24, register, 0))
+                        }
                     }
                     let after = prog.op.count
+                    for c in checks {
+                        prog.y[c] = after
+                    }
                     for s in splits {
                         if greedy {
                             prog.x[s] = s + 1
@@ -1278,14 +1326,15 @@ fn rxRun(_ it: bind Interp, _ p: RxProgram, _ m: bind RxMatcher, _ startPc: Int,
                 }
             }
             15 -> {
-                if rxWordAt(m, sp - 1, ascii) != rxWordAt(m, sp, ascii) {
+                // (Neither \b nor \B matches in an empty text, as in CPython.)
+                if m.end > 0 && rxWordAt(m, sp - 1, ascii) != rxWordAt(m, sp, ascii) {
                     pc += 1
                 } else {
                     ok = false
                 }
             }
             16 -> {
-                if rxWordAt(m, sp - 1, ascii) == rxWordAt(m, sp, ascii) {
+                if m.end > 0 && rxWordAt(m, sp - 1, ascii) == rxWordAt(m, sp, ascii) {
                     pc += 1
                 } else {
                     ok = false
@@ -1498,7 +1547,8 @@ fn rxSubject(_ it: bind Interp, _ text: String, _ withCase: Bool) {
     var codes: [Int] = []
     var lower: [Int] = []
     var upper: [Int] = []
-    for ch in text.characters {
+    let chars = text.characters
+    for ch in chars {
         let code = ordOf(ch)
         codes.append(code)
         if withCase {
@@ -1507,6 +1557,7 @@ fn rxSubject(_ it: bind Interp, _ text: String, _ withCase: Bool) {
         }
     }
     it.rx.text = text
+    it.rx.chars = chars
     it.rx.codes = codes
     it.rx.lower = lower
     it.rx.upper = upper
@@ -1527,10 +1578,57 @@ fn rxResult(_ it: bind Interp, _ m: RxMatcher) -> Value {
     it.newList(out)
 }
 
+// A part of the text that's being searched: taking it from the text as
+// the machine reads it is quick, where a slice in Python goes through the
+// whole text each time.
+fn rxPart(_ it: bind Interp, _ from: Int, _ to: Int) -> Value {
+    let count = it.rx.chars.count
+    if from < 0 {
+        return Value.none
+    }
+    if from >= to || from >= count {
+        return .str(s: "")
+    }
+    if from == 0 && to >= count {
+        return .str(s: it.rx.text)
+    }
+    Value.str(s: it.rx.chars.slice(from: from, to: if to > count { count } else { to }).joined())
+}
+
 // The `_re` module: compile(pattern, flags), match(pattern number, text,
 // pos, endpos, mode) and scan(pattern number, text, pos, endpos, limit),
-// which gives every match one after the other.
+// which gives every match one after the other; text(text, from, to) and
+// cut(text, [from, to, from, to, …]) give parts of a text (None for a
+// part that starts at -1: a group that didn't match).
 fn rxCall(_ it: bind Interp, _ name: String, _ args: [Value]) -> Value {
+    if name == "text" || name == "cut" {
+        var text = ""
+        match args.first ?? Value.none {
+            .str(s) -> { text = s }
+            _ -> { return it.throw("TypeError", "expected string or bytes-like object") }
+        }
+        rxSubject(it, text, false)
+        if name == "text" {
+            if args.count != 3 {
+                return it.throw("TypeError", "_re.text() takes 3 arguments")
+            }
+            return rxPart(it, intOf(args[1]) ?? -1, intOf(args[2]) ?? -1)
+        }
+        var bounds: [Value] = []
+        if args.count == 2 {
+            match args[1] {
+                .list(id) -> { bounds = it.lists[id] }
+                _ -> {}
+            }
+        }
+        var parts: [Value] = []
+        var i = 0
+        while i + 1 < bounds.count {
+            parts.append(rxPart(it, intOf(bounds[i]) ?? -1, intOf(bounds[i + 1]) ?? -1))
+            i += 2
+        }
+        return it.newList(parts)
+    }
     if name == "compile" {
         if args.count != 2 {
             return it.throw("TypeError", "_re.compile() takes a pattern and flags")

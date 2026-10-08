@@ -169,6 +169,8 @@ def length_hint(obj, default=0):
 class attrgetter:
     """attrgetter("a.b")(x) is x.a.b; with several names, a tuple of them."""
 
+    __module__ = "operator"
+
     def __init__(self, attr, *attrs):
         names = (attr,) + attrs
         for name in names:
@@ -193,6 +195,8 @@ class attrgetter:
 class itemgetter:
     """itemgetter(1)(x) is x[1]; with several items, a tuple of them."""
 
+    __module__ = "operator"
+
     def __init__(self, item, *items):
         self._items = (item,) + items
 
@@ -207,6 +211,8 @@ class itemgetter:
 
 class methodcaller:
     """methodcaller("name", 1)(x) is x.name(1)."""
+
+    __module__ = "operator"
 
     def __init__(self, name, *args, **kwargs):
         if not isinstance(name, str):

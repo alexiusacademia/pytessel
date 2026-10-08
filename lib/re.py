@@ -24,6 +24,8 @@ _FLAG_NAMES = [(256, "re.ASCII"), (2, "re.IGNORECASE"), (4, "re.LOCALE"), (8, "r
 class error(Exception):
     """A pattern that isn't a valid regular expression."""
 
+    __module__ = "re"
+
     def __init__(self, msg, pattern=None, pos=None):
         self.msg = msg
         self.pattern = pattern
@@ -46,6 +48,8 @@ def _is_text(value):
 
 class Match:
     """One match of a pattern in a text."""
+
+    __module__ = "re"
 
     def __init__(self, pattern, string, pos, endpos, spans):
         self.re = pattern
@@ -70,7 +74,7 @@ class Match:
         start = self._spans[2 * index]
         if start < 0:
             return default
-        return self.string[start:self._spans[2 * index + 1]]
+        return _re.text(self.string, start, self._spans[2 * index + 1])
 
     def group(self, *groups):
         if len(groups) == 0:
@@ -113,6 +117,8 @@ class Match:
 
 class Pattern:
     """A compiled regular expression."""
+
+    __module__ = "re"
 
     def __init__(self, pattern, flags, code, groups, groupindex):
         self.pattern = pattern
@@ -176,33 +182,39 @@ class Pattern:
 
     def findall(self, string, pos=0, endpos=None):
         pos, endpos = self._range(string, pos, endpos)
-        out = []
         groups = self.groups
+        # Where every wanted part starts and ends, then all of them at once.
+        bounds = []
         for spans in _re.scan(self._code, string, pos, endpos, 0):
             if groups == 0:
-                out.append(string[spans[0]:spans[1]])
-            elif groups == 1:
-                out.append(string[spans[2]:spans[3]] if spans[2] >= 0 else "")
+                bounds.append(spans[0])
+                bounds.append(spans[1])
             else:
-                row = []
-                for g in range(1, groups + 1):
-                    row.append(string[spans[2 * g]:spans[2 * g + 1]] if spans[2 * g] >= 0 else "")
-                out.append(tuple(row))
+                for i in range(2, 2 * groups + 2):
+                    bounds.append(spans[i])
+        parts = _re.cut(string, bounds)
+        if groups <= 1:
+            return [part if part is not None else "" for part in parts]
+        out = []
+        for i in range(0, len(parts), groups):
+            out.append(tuple([part if part is not None else "" for part in parts[i:i + groups]]))
         return out
 
     def split(self, string, maxsplit=0):
         pos, endpos = self._range(string, 0, None)
-        out = []
-        last = 0
         if maxsplit < 0:
             return [string]
+        bounds = []
+        last = 0
         for spans in _re.scan(self._code, string, 0, endpos, maxsplit):
-            out.append(string[last:spans[0]])
-            for g in range(1, self.groups + 1):
-                out.append(string[spans[2 * g]:spans[2 * g + 1]] if spans[2 * g] >= 0 else None)
+            bounds.append(last)
+            bounds.append(spans[0])
+            for i in range(2, 2 * self.groups + 2):
+                bounds.append(spans[i])
             last = spans[1]
-        out.append(string[last:])
-        return out
+        bounds.append(last)
+        bounds.append(endpos)
+        return _re.cut(string, bounds)
 
     def subn(self, repl, string, count=0):
         pos, endpos = self._range(string, 0, None)
@@ -223,20 +235,29 @@ class Pattern:
                 parts = None
         if count < 0:
             return string, 0
-        pieces = []
+        found = _re.scan(self._code, string, 0, endpos, count)
+        # What's between the matches, all at once.
+        bounds = []
         last = 0
+        for spans in found:
+            bounds.append(last)
+            bounds.append(spans[0])
+            last = spans[1]
+        bounds.append(last)
+        bounds.append(endpos)
+        between = _re.cut(string, bounds)
+        pieces = []
         done = 0
-        for spans in _re.scan(self._code, string, 0, endpos, count):
-            pieces.append(string[last:spans[0]])
+        for spans in found:
+            pieces.append(between[done])
             if function is not None:
                 pieces.append(function(Match(self, string, 0, endpos, spans)))
             elif parts is not None:
                 pieces.append(_expand(parts, string, spans))
             else:
                 pieces.append(repl)
-            last = spans[1]
             done += 1
-        pieces.append(string[last:])
+        pieces.append(between[done])
         return "".join(pieces), done
 
     def sub(self, repl, string, count=0):
@@ -342,7 +363,7 @@ def _expand(parts, string, spans):
         if isinstance(part, int):
             start = spans[2 * part]
             if start >= 0:
-                out.append(string[start:spans[2 * part + 1]])
+                out.append(_re.text(string, start, spans[2 * part + 1]))
         else:
             out.append(part)
     return "".join(out)
@@ -365,7 +386,9 @@ def compile(pattern, flags=0):
         return _cache[key]
     made = _re.compile(pattern, flags)
     if len(made) == 2:
-        raise error(made[0], pattern, made[1] if made[1] >= 0 else None)
+        if made[1] < 0:
+            raise error(made[0])
+        raise error(made[0], pattern, made[1])
     code, groups, names, numbers, flags = made
     if not flags & 256:
         flags = flags | 32
