@@ -4,6 +4,8 @@
 #
 #   tests/run.sh             run the tests
 #   tests/run.sh --update    write the .expected files again, with python3
+#                            (or PYTHON=/path/to/python3.12: the tests of `match`,
+#                            scopes and other newer things need Python 3.12)
 #
 # Build PyTessel first: `tessel build . -o pytessel` in the project's folder.
 cd "$(dirname "$0")" || exit 1
@@ -15,7 +17,7 @@ for test in *.py; do
     # (helper.py is imported by modules.py; it isn't a test.)
     [ "$name" = helper ] && continue
     if [ "$1" = --update ]; then
-        python3 "$test" > "$name.expected" 2>&1
+        "${PYTHON:-python3}" "$test" > "$name.expected" 2>&1
         continue
     fi
     if "$pytessel" "$test" 2>&1 | diff "$name.expected" - > /dev/null; then
