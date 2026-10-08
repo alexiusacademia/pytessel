@@ -182,6 +182,7 @@ struct Interp {
             envs[e].nonlocals = []
         }
         envs[e].isClass = false
+        envs[e].isComp = false
         freeEnvs.append(e)
     }
 
@@ -234,6 +235,43 @@ struct Interp {
                         return v
                     }
                     e = envs[e].parent
+                }
+                line = prog.lines[n]
+                throw("NameError", "name '{id}' is not defined")
+            }
+            .local(id) -> {
+                if let v = envs[env].vars[id] {
+                    return v
+                }
+                line = prog.lines[n]
+                throw("UnboundLocalError", "cannot access local variable '{id}' where it is not associated with a value")
+            }
+            .free(id, depth, inlined) -> {
+                // A variable of a function around this one.
+                var e = env
+                var d = depth
+                while d > 0 && e > 0 {
+                    e = envs[e].parent
+                    while e > 0 && envs[e].isClass {
+                        e = envs[e].parent
+                    }
+                    d -= 1
+                }
+                if let v = envs[e].vars[id] {
+                    return v
+                }
+                line = prog.lines[n]
+                if inlined {
+                    return throw("UnboundLocalError", "cannot access local variable '{id}' where it is not associated with a value")
+                }
+                throw("NameError", "cannot access free variable '{id}' where it is not associated with a value in enclosing scope")
+            }
+            .globalName(id) -> {
+                if let v = envs[globalEnv()].vars[id] {
+                    return v
+                }
+                if let v = envs[0].vars[id] {
+                    return v
                 }
                 line = prog.lines[n]
                 throw("NameError", "name '{id}' is not defined")
@@ -454,6 +492,7 @@ struct Interp {
                 // A comprehension's variables are its own.
                 let outer = env
                 let inner = newEnv(outer)
+                envs[inner].isComp = true
                 env = inner
                 var out: [Value] = []
                 var outValues: [Value] = []
@@ -534,7 +573,17 @@ struct Interp {
                 if signal != .none {
                     return .none
                 }
-                setVar(target, v)
+                if envs[env].isComp {
+                    // (In a comprehension: the function's variable.)
+                    let inner = env
+                    while envs[env].isComp && envs[env].parent > 0 {
+                        env = envs[env].parent
+                    }
+                    setVar(target, v)
+                    env = inner
+                } else {
+                    setVar(target, v)
+                }
                 v
             }
             .starred(_) -> {
@@ -615,7 +664,14 @@ struct Interp {
     // `outValues`, for a dictionary).
     fn comprehend(_ kind: Int, _ element: Int, _ value: Int, _ targets: [Int], _ iters: [Int], _ conds: [[Int]],
                   _ at: Int, _ out: bind [Value], _ outValues: bind [Value]) {
+        // (The first `for`'s iterable is the function's business, not the
+        // comprehension's: it's worked out with the function's variables.)
+        let inner = env
+        if at == 0 {
+            env = envs[inner].parent
+        }
         let iterable = eval(iters[at])
+        env = inner
         if signal != .none {
             return
         }
@@ -851,6 +907,18 @@ struct Interp {
                 defaults.append(v)
             }
         }
+        var kwDefaults: [Value] = []
+        for d in def.kwDefaults {
+            if d < 0 {
+                kwDefaults.append(.absent)
+            } else {
+                let v = eval(d)
+                if signal != .none {
+                    return .none
+                }
+                kwDefaults.append(v)
+            }
+        }
         // A function made in a class body doesn't see the class's names.
         var home = env
         if envs[home].isClass {
@@ -862,7 +930,7 @@ struct Interp {
             envs[e].captured = true
             e = envs[e].parent
         }
-        closures.append(Closure(fnId: fnId, env: home, name: def.name, defaults: defaults, owner: -1))
+        closures.append(Closure(fnId: fnId, env: home, name: def.name, defaults: defaults, kwDefaults: kwDefaults, owner: -1))
         Value.function(id: closures.count - 1)
     }
 
@@ -893,7 +961,7 @@ struct Interp {
         }
         for k in kwNames.indices {
             let name = kwNames[k]
-            if def.params.contains(name) {
+            if def.params.contains(name) || (!def.kwonly.isEmpty && def.kwonly.contains(name)) {
                 if envs[e].vars.contains(key: name) {
                     releaseEnv(e)
                     return throw("TypeError", "{def.name}() got multiple values for argument '{name}'")
@@ -926,6 +994,29 @@ struct Interp {
                     names = missing.dropLast().joined(separator: ", ") + " and " + (missing.last ?? "")
                 }
                 return throw("TypeError", "{def.name}() missing {missing.count} required positional argument{s}: {names}")
+            }
+        }
+        if !def.kwonly.isEmpty {
+            // The parameters given by name only: their defaults, or missing.
+            var missing: [String] = []
+            for i in def.kwonly.indices {
+                let p = def.kwonly[i]
+                if !envs[e].vars.contains(key: p) {
+                    if c.kwDefaults[i] == Value.absent {
+                        missing.append("'{p}'")
+                    } else {
+                        envs[e].vars[p] = c.kwDefaults[i]
+                    }
+                }
+            }
+            if !missing.isEmpty {
+                releaseEnv(e)
+                let s = if missing.count == 1 { "" } else { "s" }
+                var names = missing.joined(separator: ", ")
+                if missing.count > 1 {
+                    names = missing.dropLast().joined(separator: ", ") + " and " + (missing.last ?? "")
+                }
+                return throw("TypeError", "{def.name}() missing {missing.count} required keyword-only argument{s}: {names}")
             }
         }
 
@@ -1479,6 +1570,24 @@ struct Interp {
 
     // target op= value.
     fn augmentedAssign(_ n: Int, _ op: BinOp, _ target: Int, _ value: Int) {
+        let simple = nameOf(target)
+        if simple != "" {
+            let current = eval(target)
+            if signal != .none {
+                return
+            }
+            let v = eval(value)
+            if signal != .none {
+                return
+            }
+            line = prog.lines[n]
+            let result = inPlaceOp(self, op, current, v)
+            if signal != .none {
+                return
+            }
+            setVar(simple, result)
+            return
+        }
         match prog.nodes[target] {
             .name(id) -> {
                 let current = lookup(id)
@@ -1547,8 +1656,31 @@ struct Interp {
         }
     }
 
+    // The name a node is, however the parser settled it ("" if it's not one).
+    fn nameOf(_ n: Int) -> String {
+        match prog.nodes[n] {
+            .name(id) -> id
+            .local(id) -> id
+            .free(id, _, _) -> id
+            .globalName(id) -> id
+            _ -> ""
+        }
+    }
+
     fn deleteTarget(_ target: Int) {
         match prog.nodes[target] {
+            .local(id) -> {
+                if envs[env].vars.removeValue(forKey: id) == nil {
+                    line = prog.lines[target]
+                    throw("UnboundLocalError", "cannot access local variable '{id}' where it is not associated with a value")
+                }
+            }
+            .globalName(id) -> {
+                if envs[globalEnv()].vars.removeValue(forKey: id) == nil {
+                    line = prog.lines[target]
+                    throw("NameError", "name '{id}' is not defined")
+                }
+            }
             .name(id) -> {
                 if envs[env].vars.removeValue(forKey: id) == nil {
                     line = prog.lines[target]
@@ -1683,6 +1815,10 @@ struct Interp {
                             handling.append(raised)
                             execBlock(handlerBody)
                             handling.removeLast()
+                            if name != "" {
+                                // (`e` is gone when its block ends.)
+                                envs[env].vars.removeValue(forKey: name)
+                            }
                             break
                         }
                     }

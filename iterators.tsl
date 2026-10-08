@@ -342,6 +342,7 @@ fn iterContains(_ it: bind Interp, _ container: Value, _ item: Value) -> Bool {
 // iterator of its first `for`, which is worked out where it's written.
 fn makeGenexpr(_ it: bind Interp, _ n: Int, _ first: Value) -> Value {
     let inner = it.newEnv(it.env)
+    it.envs[inner].isComp = true
     // It runs later: the variables around it stay.
     var e = inner
     while e >= 0 && !it.envs[e].captured {

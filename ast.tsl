@@ -21,6 +21,14 @@ enum Node {
     // b"…": its bytes.
     bytesLit(value: [Int])
     name(id: String)
+    // A name the parser found out about (see `Scope` in parser.tsl): a
+    // variable of the function it's in; one of a function around it,
+    // `depth` functions out (`inlined`: reached only through
+    // comprehensions, which Python counts as the function itself); one
+    // the function says is `global`.
+    local(id: String)
+    free(id: String, depth: Int, inlined: Bool)
+    globalName(id: String)
     binary(op: BinOp, left: Int, right: Int)
     unary(op: UnOp, operand: Int)
     boolOp(isAnd: Bool, left: Int, right: Int)
@@ -110,6 +118,10 @@ struct FuncDef {
     // The names of `*args` and `**kwargs`, if it has them.
     varargs: String = ""
     kwargs: String = ""
+    // The parameters after `*` or `*args`, given by name only, and the
+    // node of each one's default (-1 for none).
+    kwonly: [String] = []
+    kwDefaults: [Int] = []
     body: [Int] = []
     // A lambda's body is one expression, whose value it returns.
     isLambda: Bool = false

@@ -3,6 +3,27 @@
 // syntax error, `error` is set and what's parsed doesn't matter any more;
 // every loop stops when it is.
 
+// What the parser knows of a function's variables while it reads it.
+// Python decides where a name lives by the whole function: a name that's
+// assigned anywhere in it is the function's own everywhere in it. So each
+// name that's read is noted (`refs`), and when the function has been read to
+// its end, the ones it assigns become `.local` nodes; the others are handed
+// to the function around it (one more step out: `depths`), which does the
+// same and makes them `.free`. What no function assigns stays a `.name`,
+// looked for where the program runs: the module's names and the built-ins.
+struct Scope {
+    // 0 the module, 1 a function, 2 a class body, 3 a comprehension, 4 a
+    // generator expression.
+    kind: Int = 0
+    bound: Set<String> = []
+    globals: Set<String> = []
+    nonlocals: Set<String> = []
+    refs: [Int] = []
+    depths: [Int] = []
+    // (Whether a name came only through comprehensions on its way here.)
+    inlined: [Bool] = []
+}
+
 struct Parser {
     tokens: [Token] = []
     pos: Int = 0
@@ -17,6 +38,147 @@ struct Parser {
     // how many `yield`s the `def` being parsed has had so far.
     yielding: [Bool] = []
     yieldCount: Int = 0
+    // The functions being read, the innermost last, and the name nodes
+    // that are assigned to (not read).
+    scopes: [Scope] = []
+    stores: Set<Int> = []
+
+    // ---- scopes ----
+
+    fn pushScope(_ kind: Int) {
+        scopes.append(Scope(kind: kind))
+    }
+
+    // The scope on top has been read to its end: its names are settled,
+    // or handed to the scope around it.
+    fn popScope() {
+        let s = scopes.removeLast()
+        let outer = scopes.count - 1
+        for i in s.refs.indices {
+            let n = s.refs[i]
+            let d = s.depths[i]
+            if d == 0 && stores.contains(n) {
+                continue
+            }
+            var id = ""
+            match nodes[n] {
+                .name(x) -> { id = x }
+                _ -> {}
+            }
+            if id == "" {
+                continue
+            }
+            if s.kind == 2 {
+                // (A class body's own names are looked for as it runs.)
+                if d > 0 && outer >= 0 {
+                    scopes[outer].refs.append(n)
+                    scopes[outer].depths.append(d)
+                    scopes[outer].inlined.append(false)
+                }
+                continue
+            }
+            if s.kind == 0 {
+                continue
+            }
+            if s.globals.contains(id) {
+                nodes[n] = .globalName(id: id)
+            } else if s.bound.contains(id) && !s.nonlocals.contains(id) {
+                nodes[n] = if d == 0 { Node.local(id: id) } else { Node.free(id: id, depth: d, inlined: s.inlined[i]) }
+            } else if outer >= 0 {
+                scopes[outer].refs.append(n)
+                scopes[outer].depths.append(d + 1)
+                scopes[outer].inlined.append(s.inlined[i] && s.kind == 3)
+            }
+        }
+    }
+
+    fn noteRef(_ n: Int) {
+        let top = scopes.count - 1
+        if top >= 0 {
+            scopes[top].refs.append(n)
+            scopes[top].depths.append(0)
+            scopes[top].inlined.append(true)
+        }
+    }
+
+    // How many names the scope on top has noted, to go back to.
+    fn markRefs() -> Int {
+        if let s = scopes.last {
+            return s.refs.count
+        }
+        0
+    }
+
+    fn resetRefs(_ mark: Int) {
+        let top = scopes.count - 1
+        if top < 0 {
+            return
+        }
+        while scopes[top].refs.count > mark {
+            scopes[top].refs.removeLast()
+            scopes[top].depths.removeLast()
+            scopes[top].inlined.removeLast()
+        }
+    }
+
+    // A name is given a value here: it's the function's own (a
+    // comprehension passes it on to the function it's in).
+    fn bindName(_ name: String) {
+        var at = scopes.count - 1
+        while at > 0 && scopes[at].kind >= 3 {
+            at -= 1
+        }
+        if at >= 0 && name != "" {
+            scopes[at].bound.insert(name)
+        }
+    }
+
+    // The names a target gives values to. `store`: it's only assigned
+    // (`x = …`), not read first as in `x += …` and `del x`. `here`: a
+    // comprehension's `for` variable, which is the comprehension's own.
+    fn bindTarget(_ n: Int, _ store: Bool, _ here: Bool) {
+        match nodes[n] {
+            .name(id) -> {
+                if here {
+                    scopes[scopes.count - 1].bound.insert(id)
+                } else {
+                    bindName(id)
+                }
+                if store {
+                    stores.insert(n)
+                }
+            }
+            .tupleLit(items) -> {
+                for i in items {
+                    bindTarget(i, store, here)
+                }
+            }
+            .listLit(items) -> {
+                for i in items {
+                    bindTarget(i, store, here)
+                }
+            }
+            .starred(value) -> bindTarget(value, store, here)
+            _ -> {}
+        }
+    }
+
+    // A function's parameters are its own names.
+    fn bindParameters(_ def: FuncDef) {
+        let top = scopes.count - 1
+        for p in def.params {
+            scopes[top].bound.insert(p)
+        }
+        for p in def.kwonly {
+            scopes[top].bound.insert(p)
+        }
+        if def.varargs != "" {
+            scopes[top].bound.insert(def.varargs)
+        }
+        if def.kwargs != "" {
+            scopes[top].bound.insert(def.kwargs)
+        }
+    }
 
     // ---- tokens ----
 
@@ -269,6 +431,7 @@ struct Parser {
         let at = line()
         advance()
         let target = targetList()
+        bindTarget(target, true, false)
         expectKw("in")
         let iter = expressionList()
         let body = block()
@@ -306,18 +469,28 @@ struct Parser {
 
     fn parameters(_ closer: String) -> FuncDef {
         var def = FuncDef(line: line())
+        var byName = false
         while !isOp(closer) && error == "" {
             if acceptOp("**") {
                 def.kwargs = expectName()
                 skipAnnotation(closer)
             } else if acceptOp("*") {
                 // (A bare `*` only says that what follows is given by name.)
+                byName = true
                 if kind() == .name {
                     def.varargs = expectName()
                     skipAnnotation(closer)
                 }
             } else if acceptOp("/") {
                 // (What came before is given by position: nothing to do.)
+            } else if byName {
+                def.kwonly.append(expectName())
+                skipAnnotation(closer)
+                if acceptOp("=") {
+                    def.kwDefaults.append(expression())
+                } else {
+                    def.kwDefaults.append(-1)
+                }
             } else {
                 def.params.append(expectName())
                 skipAnnotation(closer)
@@ -354,9 +527,13 @@ struct Parser {
         }
         def.name = name
         def.line = at
+        bindName(name)
         yields.append(false)
         let outerCount = yieldCount
+        pushScope(1)
+        bindParameters(def)
         def.body = block()
+        popScope()
         yieldCount = outerCount
         def.isGenerator = yields.removeLast()
         defs.append(def)
@@ -384,7 +561,10 @@ struct Parser {
             }
             expectOp(")")
         }
+        bindName(name)
+        pushScope(2)
         let body = block()
+        popScope()
         add(.classDef(name: name, bases: bases, body: body, decorators: decorators), at)
     }
 
@@ -424,6 +604,7 @@ struct Parser {
                 type = expression()
                 if acceptKw("as") {
                     name = expectName()
+                    bindName(name)
                 }
             }
             let handlerBody = block()
@@ -455,7 +636,9 @@ struct Parser {
         while error == "" {
             items.append(expression())
             if acceptKw("as") {
-                targets.append(target())
+                let t = target()
+                bindTarget(t, true, false)
+                targets.append(t)
             } else {
                 targets.append(-1)
             }
@@ -848,16 +1031,6 @@ struct Parser {
         add(.patClass(cls: cls, patterns: patterns, names: names), at)
     }
 
-    // (Scopes: filled in with the rules of local variables.)
-    fn markRefs() -> Int {
-        0
-    }
-
-    fn resetRefs(_ mark: Int) {
-    }
-
-    fn bindName(_ name: String) {
-    }
 
     fn augmentedOp() -> BinOp? {
         if kind() != .op {
@@ -934,11 +1107,19 @@ struct Parser {
                 }
                 "global" -> {
                     advance()
-                    return add(.globalStmt(names: nameList()), at)
+                    let names = nameList()
+                    for name in names {
+                        scopes[scopes.count - 1].globals.insert(name)
+                    }
+                    return add(.globalStmt(names: names), at)
                 }
                 "nonlocal" -> {
                     advance()
-                    return add(.nonlocalStmt(names: nameList()), at)
+                    let names = nameList()
+                    for name in names {
+                        scopes[scopes.count - 1].nonlocals.insert(name)
+                    }
+                    return add(.nonlocalStmt(names: names), at)
                 }
                 "del" -> {
                     advance()
@@ -948,6 +1129,9 @@ struct Parser {
                             break
                         }
                         targets.append(bitOr())
+                    }
+                    for t in targets {
+                        bindTarget(t, false, false)
                     }
                     return add(.delStmt(targets: targets), at)
                 }
@@ -968,6 +1152,8 @@ struct Parser {
                         let name = dottedName()
                         names.append(name)
                         aliases.append(if acceptKw("as") { expectName() } else { name })
+                        bindName(aliases[aliases.count - 1])
+                        bindName(name.split(".")[0])
                         if !acceptOp(",") {
                             break
                         }
@@ -989,6 +1175,7 @@ struct Parser {
                             let name = expectName()
                             names.append(name)
                             aliases.append(if acceptKw("as") { expectName() } else { name })
+                            bindName(aliases[aliases.count - 1])
                             if !acceptOp(",") {
                                 break
                             }
@@ -1010,6 +1197,7 @@ struct Parser {
         if let op = augmentedOp() {
             advance()
             checkTarget(first, augmented: true)
+            bindTarget(first, false, false)
             let value = if isKw("yield") { yieldExpression() } else { expressionList() }
             return add(.augAssign(op: op, target: first, value: value), at)
         }
@@ -1019,6 +1207,7 @@ struct Parser {
             expression()
             if acceptOp("=") {
                 checkTarget(first, augmented: true)
+                bindTarget(first, true, false)
                 let value = expressionList()
                 return add(.assign(targets: [first], value: value), at)
             }
@@ -1035,6 +1224,7 @@ struct Parser {
             }
             for t in targets {
                 checkTarget(t, augmented: false)
+                bindTarget(t, true, false)
             }
             return add(.assign(targets: targets, value: value), at)
         }
@@ -1119,6 +1309,7 @@ struct Parser {
             let name = text()
             advance()
             advance()
+            bindName(name)
             return add(.walrus(target: name, value: expression()), at)
         }
         expression()
@@ -1171,7 +1362,10 @@ struct Parser {
         def.line = at
         yields.append(false)
         let outerCount = yieldCount
+        pushScope(1)
+        bindParameters(def)
         def.body = [expression()]
+        popScope()
         yieldCount = outerCount
         yields.removeLast()
         defs.append(def)
@@ -1404,10 +1598,11 @@ struct Parser {
                 names.append(name)
             } else {
                 let argLine = line()
+                let mark = markRefs()
                 var value = namedExpression()
                 if isKw("for") {
                     // f(x for x in xs): a generator as the only argument.
-                    value = comprehension(3, value, -1, argLine)
+                    value = comprehension(3, value, -1, argLine, mark)
                 }
                 args.append(value)
                 names.append("")
@@ -1461,20 +1656,45 @@ struct Parser {
     }
 
     // `for target in iter if cond …` after a comprehension's element.
-    fn comprehension(_ compKind: Int, _ element: Int, _ value: Int, _ at: Int) -> Int {
+    // The names read in the element (noted since `mark`) are the
+    // comprehension's to settle, with its `for` variables; its first
+    // iterable is worked out by the function around it.
+    fn comprehension(_ compKind: Int, _ element: Int, _ value: Int, _ at: Int, _ mark: Int) -> Int {
         var targets: [Int] = []
         var iters: [Int] = []
         var conds: [[Int]] = []
+        var s = Scope(kind: if compKind == 3 { 4 } else { 3 })
+        let top = scopes.count - 1
+        for i in mark..scopes[top].refs.count {
+            s.refs.append(scopes[top].refs[i])
+            s.depths.append(scopes[top].depths[i])
+            s.inlined.append(scopes[top].inlined[i])
+        }
+        resetRefs(mark)
+        var first = true
         while acceptKw("for") && error == "" {
-            targets.append(targetList())
+            scopes.append(s)
+            let t = targetList()
+            bindTarget(t, true, true)
+            targets.append(t)
             expectKw("in")
-            iters.append(orTest())
+            if first {
+                s = scopes.removeLast()
+                iters.append(orTest())
+                scopes.append(s)
+                first = false
+            } else {
+                iters.append(orTest())
+            }
             var tests: [Int] = []
             while acceptKw("if") && error == "" {
                 tests.append(orTest())
             }
             conds.append(tests)
+            s = scopes.removeLast()
         }
+        scopes.append(s)
+        popScope()
         add(.comp(kind: compKind, element: element, value: value, targets: targets, iters: iters, conds: conds), at)
     }
 
@@ -1487,7 +1707,9 @@ struct Parser {
             if t == "Ellipsis" {
                 return add(.ellipsisLit, at)
             }
-            return add(.name(id: t), at)
+            let n = add(.name(id: t), at)
+            noteRef(n)
+            return n
         }
         if k == .int {
             advance()
@@ -1576,9 +1798,10 @@ struct Parser {
             expectOp(")")
             return y
         }
+        let mark = markRefs()
         let first = starOrExpression()
         if isKw("for") {
-            let c = comprehension(3, first, -1, at)
+            let c = comprehension(3, first, -1, at, mark)
             expectOp(")")
             return c
         }
@@ -1601,9 +1824,10 @@ struct Parser {
         if acceptOp("]") {
             return add(.listLit(items: []), at)
         }
+        let mark = markRefs()
         let first = starOrExpression()
         if isKw("for") {
-            let c = comprehension(0, first, -1, at)
+            let c = comprehension(0, first, -1, at, mark)
             expectOp("]")
             return c
         }
@@ -1625,6 +1849,7 @@ struct Parser {
         }
         var keys: [Int] = []
         var values: [Int] = []
+        let mark = markRefs()
         if acceptOp("**") {
             keys.append(-1)
             values.append(bitOr())
@@ -1633,7 +1858,7 @@ struct Parser {
             if !isOp(":") {
                 // A set.
                 if isKw("for") {
-                    let c = comprehension(1, first, -1, at)
+                    let c = comprehension(1, first, -1, at, mark)
                     expectOp("\}")
                     return c
                 }
@@ -1650,7 +1875,7 @@ struct Parser {
             advance()
             let value = expression()
             if isKw("for") {
-                let c = comprehension(2, first, value, at)
+                let c = comprehension(2, first, value, at, mark)
                 expectOp("\}")
                 return c
             }
@@ -1859,6 +2084,7 @@ fn parseInto(_ program: bind Program, _ source: String) {
     }
     var parser = Parser(tokens: lexed.tokens, nodes: program.nodes, lines: program.lines, defs: program.defs,
                         yielding: program.yielding)
+    parser.pushScope(0)
     if parser.nodes.isEmpty {
         // (Node 0 stands in for what couldn't be parsed.)
         parser.nodes.append(.passStmt)

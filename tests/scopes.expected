@@ -1,0 +1,91 @@
+UnboundLocalError: cannot access local variable 'x' where it is not associated with a value
+local x
+global x
+global x
+UnboundLocalError: cannot access local variable 'counter' where it is not associated with a value
+UnboundLocalError: cannot access local variable 'x' where it is not associated with a value
+set
+UnboundLocalError: cannot access local variable 'value' where it is not associated with a value
+3
+UnboundLocalError: cannot access local variable 'item' where it is not associated with a value
+2
+global x
+("UnboundLocalError: cannot access local variable 'handle' where it is not associated with a value", 'entered')
+("cannot access local variable 'math' where it is not associated with a value", 2)
+("cannot access local variable 'sqrt' where it is not associated with a value", 3.0)
+("cannot access local variable 'helper' where it is not associated with a value", 'helped')
+("cannot access local variable 'Inner' where it is not associated with a value", 'Inner')
+("cannot access local variable 'w' where it is not associated with a value", 10)
+("cannot access local variable 'b' where it is not associated with a value", 1, 2, [3, 4])
+(2, 2, (), 'k', {})
+(2, 5, (6, 7), 'K', {'z': 1})
+global x
+({'x': 2}, 6, 'global x')
+UnboundLocalError: cannot access local variable 'value' where it is not associated with a value
+UnboundLocalError: cannot access local variable 'never' where it is not associated with a value
+UnboundLocalError: cannot access local variable 'v' where it is not associated with a value
+2
+UnboundLocalError: cannot access local variable 'x' where it is not associated with a value
+global x
+NameError: name 'module_level' is not defined
+NameError: name 'module_level' is not defined
+NameError: name 'never_defined' is not defined NameError
+True
+global x
+changed by set_global new global
+5
+10
+10
+NameError: name 'not_there' is not defined
+None
+NameError: name 'made_here' is not defined
+NameError: name 'made_here' is not defined
+global x
+10
+10
+outer
+("NameError: cannot access free variable 'later' where it is not associated with a value in enclosing scope", 'now set')
+NameError: cannot access free variable 'value' where it is not associated with a value in enclosing scope
+('inner', 'outer')
+UnboundLocalError: cannot access local variable 'value' where it is not associated with a value
+1 2 12 12
+1 12 1
+('set from bottom', 'set from bottom')
+('c', 'a')
+106
+[2, 2, 2]
+[0, 1, 2]
+global x
+(6, "name 'undefined_in_lambda' is not defined")
+720
+["cannot access local variable 'before' where it is not associated with a value", 1, 0, 1, 3]
+(10, [21, 22])
+([0, 1, 4, 9], 'untouched')
+[0, 1, 2] module n {'a': 'a', 'b': 'b'} module n {1} module n ['x'] module n
+([0, 3, 6], {'a': 3, 'b': 3}, 6)
+UnboundLocalError: cannot access local variable 'unset' where it is not associated with a value
+NameError: cannot access free variable 'unset' where it is not associated with a value in enclosing scope
+([1, 2, 3], [1, 2, 3])
+([1, 2, 3, 4], [[10, 20], [30, 40]])
+([0, 2, 4, 6], 6)
+[5, 6, 7]
+[0, 10, 20]
+['a', 'b'] ['global x', 'global x']
+NameError: name 'undefined_name' is not defined
+module kind class kind class kind module kind class kind
+('function kind', 'function kind')
+[0, 1, 2] [0, 2, 4] NameError: name 'limit' is not defined
+1 2 2
+('boom', "cannot access local variable 'e' where it is not associated with a value")
+UnboundLocalError: cannot access local variable 'e' where it is not associated with a value
+kept
+NameError: name 'err' is not defined
+['inside', "cannot access local variable 'e' where it is not associated with a value"]
+('ZeroDivisionError', 'division by zero')
+('unbound', 1, [2, 3])
+unbound
+(42, 'global x')
+7
+['counter', 'offset', 'x']
+(1, (2, 3), None, False)
+(1, (), 'k', False)

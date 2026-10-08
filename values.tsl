@@ -145,6 +145,8 @@ struct Closure {
     // The values of its parameters' defaults (`.absent` for none), worked
     // out when the `def` ran.
     defaults: [Value] = []
+    // The same for its keyword-only parameters.
+    kwDefaults: [Value] = []
     // The class it's a method of (-1 if none), for `super()`.
     owner: Int = -1
 }
@@ -244,6 +246,8 @@ struct GenFrame {
     pendingExc: Value = Value.none
     lines: [Int] = []
     names: [String] = []
+    // The `e` of the `except … as e` block it's in: gone when the block ends.
+    unbind: String = ""
 }
 
 // A generator: a call of a function with `yield`, which runs a piece at a
@@ -291,6 +295,8 @@ struct Env {
     vars: [String: Value] = [:]
     parent: Int = -1
     isClass: Bool = false
+    // A comprehension's own variables: `:=` in it sets the function's.
+    isComp: Bool = false
     // A function was made here: it may use these variables later, so they
     // stay when the call ends.
     captured: Bool = false

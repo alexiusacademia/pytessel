@@ -216,7 +216,8 @@ fn genStep(_ it: bind Interp, _ gid: Int, _ n: Int) -> Value {
             // The target is read first, then the generator waits.
             var held: [Value] = []
             match it.prog.nodes[target] {
-                .name(id) -> { held = [it.lookup(id)] }
+                .name(_), .local(_), .globalName(_) -> { held = [it.eval(target)] }
+                .free(_, _, _) -> { held = [it.eval(target)] }
                 .attr(object, name) -> {
                     let o = it.eval(object)
                     if it.signal != .none {
@@ -376,8 +377,12 @@ fn genComplete(_ it: bind Interp, _ gid: Int, _ n: Int, _ v: Value) {
             if it.signal != .none {
                 return
             }
+            let simple = it.nameOf(target)
+            if simple != "" {
+                it.setVar(simple, result)
+                return
+            }
             match it.prog.nodes[target] {
-                .name(id) -> it.setVar(id, result)
                 .attr(_, name) -> setAttr(it, held[0], name, result)
                 .subscript(_, _) -> setItem(it, held[0], held[1], result)
                 _ -> {}
@@ -529,6 +534,7 @@ fn genBlockEnd(_ it: bind Interp, _ gid: Int, _ top: Int) {
             }
             if phase == 1 {
                 it.handling.removeLast()
+                genUnbind(it, gid, top)
             }
             if phase == 0 {
                 match it.prog.nodes[n] {
@@ -626,6 +632,7 @@ fn genHandle(_ it: bind Interp, _ gid: Int, _ top: Int) -> Bool {
                         it.setVar(name, raised)
                     }
                     it.handling.append(raised)
+                    it.generators[gid].frames[top].unbind = name
                     it.generators[gid].frames[top].phase = 1
                     it.generators[gid].frames[top].body = body
                     it.generators[gid].frames[top].pc = 0
@@ -659,6 +666,7 @@ fn genUnwind(_ it: bind Interp, _ gid: Int, _ top: Int) {
             }
             if phase == 1 {
                 it.handling.removeLast()
+                genUnbind(it, gid, top)
             }
             genFinally(it, gid, top)
         }
@@ -684,6 +692,15 @@ fn genUnwind(_ it: bind Interp, _ gid: Int, _ top: Int) {
             it.traceLines = lines
             it.traceNames = names
         }
+    }
+}
+
+// An `except … as e` block ended: `e` is gone.
+fn genUnbind(_ it: bind Interp, _ gid: Int, _ top: Int) {
+    let name = it.generators[gid].frames[top].unbind
+    if name != "" {
+        it.envs[it.env].vars.removeValue(forKey: name)
+        it.generators[gid].frames[top].unbind = ""
     }
 }
 
