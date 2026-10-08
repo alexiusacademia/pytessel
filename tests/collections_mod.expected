@@ -1,0 +1,142 @@
+Counter({'a': 5, 'b': 2, 'r': 2, 'c': 1, 'd': 1})
+5 2 0 False True 5
+[('a', 5), ('b', 2)] [('a', 5), ('b', 2), ('r', 2), ('c', 1), ('d', 1)] []
+['a', 'b', 'c', 'd', 'r'] [('a', 5), ('b', 2), ('c', 1), ('d', 1), ('r', 2)] [1, 1, 2, 2, 5] 11
+['a', 'a', 'a', 'a', 'a', 'b', 'b', 'c', 'd', 'r', 'r']
+Counter() Counter() False True
+Counter({'a': 3, 'b': 1}) Counter({'y': 5, 'x': 2}) Counter({'x': 2, 'y': 1})
+[('the', 3)] 3 0 9
+Counter({'a': 5, 'b': 4, 'c': 3, 'd': 2})
+Counter({'a': 3})
+Counter({'b': 2, 'a': 1})
+Counter({'a': 4, 'd': 4, 'c': 3, 'b': 2})
+Counter({'a': 4, 'b': 2}) Counter({'d': 2})
+Counter({'a': 3, 'b': 0, 'c': -3, 'd': -6})
+Counter({'a': 5, 'b': 1, 'c': -3, 'd': -6})
+Counter({'a': 15, 'b': 1, 'q': 1, 'c': -3, 'd': -6})
+5 15
+12 0
+Counter({'new': 7, 'b': 3, 'c': 2, 'a': -3}) ['b', 'b', 'b', 'c', 'c', 'new', 'new', 'new', 'new', 'new', 'new', 'new']
+False 0 3
+2 None none 3
+Counter() 0
+1 11 True False True True
+{'h': 1, 'e': 1, 'l': 2, 'o': 1} ['h', 'e', 'l', 'o'] [1, 1, 2, 1] {'l': 2, 'h': 1, 'e': 1, 'o': 1}
+Counter({'b': 2, 'c': 2, 'a': 1, 'd': 1})
+Counter({'a': 1, 'b': 1, 'c': 1, 'd': 1})
+Counter({'a': 2})
+Counter({'a': 1, 'b': 1})
+Counter({'a': 4, 'c': 2, 'b': 1})
+Counter({1: 3, 2.0: 2}) Counter({(1, 2): 2, (3,): 1})
+('i', 4)
+['i', 's', 'p']
+True False
+Counter({'a': 2, 'b': 1}) Counter({'a': 0}) False
+TypeError unsupported operand type(s) for +: 'Counter' and 'dict'
+NotImplementedError Counter.fromkeys() is undefined.  Use Counter(iterable) instead.
+[('p', 3), ('a', 2), ('e', 2)]
+defaultdict(<class 'list'>, {'a': [1, 3], 'b': [2]}) {'a': [1, 3], 'b': [2]} 2 ['a', 'b'] [('a', [1, 3]), ('b', [2])]
+[1, 3] [] True False None 5 3
+defaultdict(<class 'int'>, {'m': 1, 'i': 4, 's': 4, 'p': 2, 'x': 0}) 0 [('i', 4), ('m', 1), ('p', 2), ('s', 4), ('x', 0)]
+defaultdict(<class 'int'>, {}) defaultdict(None, {}) defaultdict(None, {'a': 1}) defaultdict(<class 'list'>, {'k': [1]}) defaultdict(<class 'int'>, {'a': 1})
+{0: [0, 3, 6, 9], 1: [1, 4, 7], 2: [2, 5, 8]}
+{'y': 1, 'z': 2} ['x'] 1
+KeyError 'missing'
+True True None
+[1, 3, 99] False True
+False True True
+[2] v v ['a', 's', 'zzz']
+[('s', 'v'), ('u', 1), ('w', 2), ('zzz', [])] ['zzz', 's', 'u', 'w']
+0 False defaultdict(<class 'list'>, {})
+TypeError first argument must be callable or None
+leaf leaf 2 None 2
+{'to': [0, 4], 'be': [1, 5], 'or': [2], 'not': [3]}
+OrderedDict([('one', 1), ('two', 2), ('three', 3)]) ['one', 'two', 'three'] ['one', 'two', 'three'] [1, 2, 3] [('one', 1), ('two', 2), ('three', 3)] 3
+['two', 'three', 'one']
+['three', 'two', 'one']
+['two', 'three', 'one']
+('one', 1) ('two', 2) OrderedDict([('three', 3)])
+OrderedDict([('three', 33)]) 9 True None 9 ['three']
+OrderedDict([('a', 1), ('b', 2)]) OrderedDict([('a', 1)]) OrderedDict([('k', 'v')]) OrderedDict()
+False True True True True
+['b', 'a'] {'a': 1, 'b': 2} ['a', 'b'] [('a', 1), ('b', 2)] True
+OrderedDict([('b', 2), ('c', 3), ('d', 4)]) 3 True False
+OrderedDict([('a', None), ('b', None), ('c', None)]) OrderedDict([('a', 0), ('b', 0)])
+KeyError 'nope'
+KeyError 'dictionary is empty'
+KeyError 'nope'
+['d', 'b', 'e']
+OrderedDict()
+deque([0, 1, 2, 3, 4]) 5 0 4 2 [0, 1, 2, 3, 4] True False
+4 0 deque([1, 2, 3])
+deque([-2, -1, 1, 2, 3, 7, 8])
+deque([7, 8, -2, -1, 1, 2, 3])
+deque([-1, 1, 2, 3, 7, 8, -2])
+deque([-2, -1, 1, 2, 3, 7, 8])
+deque([-2, -1, 1, 2, 3, 7, 8])
+deque([]) deque(['a', 'b', 'c']) deque([0, 1, 2]) False True
+deque(['A', 'c', 'd', 'e', 'F']) 2 1 ['F', 'e', 'd', 'c', 'A']
+deque(['F', 'e', 'd', 'x', 'A']) True True True False
+deque([]) 0
+deque([3, 4, 5], maxlen=3) 3 deque([4, 5], maxlen=2) deque(['c', 'd'], maxlen=2) deque([], maxlen=0)
+deque([9, 3, 4], maxlen=3)
+deque([4, 7, 8], maxlen=3)
+deque(['y', 'x', 4], maxlen=3) 3
+deque([], maxlen=0) 0 None
+IndexError pop from an empty deque
+IndexError pop from an empty deque
+IndexError deque index out of range
+ValueError deque.remove(x): x not in deque
+ValueError 2 is not in deque
+IndexError deque already at its maximum size
+ValueError maxlen must be non-negative
+4950 0 deque([])
+deque(['front', 990, 991, 992, 993, 994, 995, 996, 997, 998, 999]) front 990 999 11
+deque([1, 2, 3]) deque([1, 2, 1, 2]) True 6 9
+deque([1, 2, 3, 4]) [1, 2, 3] [2, 4, 6, 8] [(0, 'a'), (1, 'b')] xyz
+1 2 [3, 4] (1,) [(1, 'a'), (2, 'b')]
+['a', 'b', 'c', 'd', 'e']
+['l3', 'l4'] []
+Point(x=3, y=4) 3 4 3 4 4 2 [3, 4] (3, 4)
+3 4 True True True True False False
+('x', 'y') {'x': 3, 'y': 4} Point(x=10, y=4) Point(x=0, y=0) Point(x=3, y=4)
+Point(x=7, y=8) Point(x=2, y=1) Point(x=5, y=6) Point Point
+True True [Point(x=1, y=2), Point(x=1, y=9), Point(x=2, y=1)] Point(x=1, y=3)
+(3, 4, 5) (3, 4, 3, 4) True False 1 1 7 True
+here True
+Person(name='Ann', age=30, city='Oslo') Ann 30 Oslo ('name', 'age', 'city')
+Pair(left=1, right=2) ('left', 'right')
+Color(r=1, g=2, b=0, alpha=255) Color(r=1, g=2, b=3, alpha=255) Color(r=1, g=2, b=3, alpha=4) {'b': 0, 'alpha': 255}
+Empty() 0 ()
+('ok', '_1', '_2', '_3', '_4') Renamed(ok=1, _1=2, _2=3, _3=4, _4=5)
+['Ann', 'Bo'] Ann is 30
+[1, 3] {'x': 3, 'y': 4}
+31 30 False False
+TypeError missing 1 required positional argument: 'y'
+TypeError takes 3 positional arguments but 4 were given
+TypeError got an unexpected keyword argument 'z'
+TypeError got multiple values for argument 'x'
+TypeError missing 2 required positional arguments: 'x' and 'y'
+TypeError missing 2 required positional arguments: 'age' and 'city'
+ValueError Encountered duplicate field name: 'a'
+ValueError Type names and field names cannot be a keyword: 'class'
+ValueError Field names cannot start with an underscore: '_b'
+ValueError Type names and field names must be valid identifiers: 'b-c'
+ValueError Type names and field names must be valid identifiers: 'Bad name'
+ValueError Got unexpected field names: ['z']
+TypeError Expected 2 arguments, got 3
+TypeError Got more default values than field names
+IndexError tuple index out of range
+Circle(radius=2) 12 2 True
+Card(rank='A', suit='S') 4 ['AS', 'KS', 'AH', 'KH'] Card(rank='A', suit='H')
+ann red None M 2 ['color', 'user'] True False
+ChainMap({'user': 'ann'}, {'color': 'red', 'user': 'guest'}) ['color', 'user'] ['color', 'user'] ['red', 'ann'] [('color', 'red'), ('user', 'ann')] {'color': 'red', 'user': 'ann'}
+{'user': 'ann', 'size': 'L'} {'color': 'red', 'user': 'guest'} L
+{'user': 'ann'} [{'user': 'ann'}, {'color': 'red', 'user': 'guest'}]
+blue ann red True 3
+ChainMap({}) [{}] False True True
+KeyError 'nope'
+KeyError "Key not found in the first mapping: 'color'"
+ann guest {} 1 {'k': 1}
+2 1 False 1 ['x', 'y']
+True []

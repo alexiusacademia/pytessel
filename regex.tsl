@@ -1,0 +1,1596 @@
+// Regular expressions, for Python's `re` module.
+//
+// Author: Alexius Academia
+// Date: 2026-10-08
+//
+// A pattern is parsed into a tree (`RxParser`), the tree is written out as
+// a small program (`RxCompiler`), and the program is run against a text by
+// a machine that backtracks (`rxRun`): where the pattern gives a choice it
+// takes the first way and notes the other on a stack, and when it can't go
+// on it comes back to the last note. The notes are kept in a list, not in
+// calls of the machine, so a long text can't make the calls too deep.
+//
+// The built-in module `_re` (at the end) is what Python sees of this:
+// lib/re.py makes `Pattern` and `Match` on top of it.
+//
+// What a program's steps are (`op`, with `x` and `y`):
+//    0 match            the pattern ends here
+//    1 char x           this character
+//    2 char x           this character, in either case (x is the small one)
+//    3 any              any character but a line break
+//    4 any              any character
+//    5 set x            a character of `sets[x]`
+//    6 split x y        go on at x; if that fails, at y
+//    7 jump x
+//    8 save x           the place in the text, as where a group starts or ends
+//    9 start of the text (^)          10 start of a line (^ with MULTILINE)
+//   11 end of the text ($)            12 end of a line ($ with MULTILINE)
+//   13 start of the text (\A)         14 end of the text (\Z)
+//   15 edge of a word (\b)            16 not an edge of a word (\B)
+//   17 backref x        what group x matched, again     18 the same, in either case
+//   19 lookahead        the steps up to y match here    20 they don't
+//   21 lookbehind       the steps up to y match the x characters before
+//   22 the same: they don't
+//   23 mark x           a loop's body starts here: the place is kept in `regs[x]`
+//   24 check x y        the loop's body matched nothing: leave the loop, at y
+//
+// Python's flags: IGNORECASE 2, MULTILINE 8, DOTALL 16, UNICODE 32,
+// VERBOSE 64, ASCII 256.
+
+// A set of characters: [a-z0-9_], \d, [^\s,].
+struct RxSet {
+    negate: Bool = false
+    // The first and the last code of each range, one after the other.
+    ranges: [Int] = []
+    // Kinds of characters: 1 a digit, 2 not one, 3 a word's character,
+    // 4 not one, 5 a space, 6 not one.
+    kinds: [Int] = []
+    ignoreCase: Bool = false
+    // Only ASCII's digits, letters and spaces (the ASCII flag).
+    ascii: Bool = false
+}
+
+struct RxProgram {
+    op: [Int] = []
+    x: [Int] = []
+    y: [Int] = []
+    sets: [RxSet] = []
+    // How many groups it has, and how many loops keep a place.
+    groups: Int = 0
+    registers: Int = 0
+    flags: Int = 0
+    // It compares letters in either case somewhere.
+    needsCase: Bool = false
+    // The character every match starts with (-1 if it could be several).
+    firstChar: Int = -1
+    // It can only match at the start of the text.
+    anchored: Bool = false
+}
+
+// The compiled patterns of an interpreter, and the last text they were
+// run against, as numbers (a text is often searched many times).
+struct RxStore {
+    programs: [RxProgram] = []
+    text: String = ""
+    codes: [Int] = []
+    lower: [Int] = []
+    upper: [Int] = []
+    hasCase: Bool = false
+    known: Bool = false
+}
+
+// A pattern's tree. Its nodes name each other by their place in a list.
+enum RxNode {
+    empty
+    char(code: Int, icase: Bool)
+    any(all: Bool)
+    set(id: Int)
+    seq(items: [Int])
+    alt(items: [Int])
+    group(index: Int, body: Int)
+    // `most` is -1 for no limit.
+    repeat(body: Int, least: Int, most: Int, greedy: Bool)
+    // ^ $ \A \Z \b \B: the step that checks it.
+    assert(kind: Int)
+    backref(group: Int, icase: Bool)
+    look(body: Int, behind: Bool, negate: Bool)
+}
+
+fn rxLower(_ code: Int) -> Int {
+    if code < 128 {
+        return if code >= 65 && code <= 90 { code + 32 } else { code }
+    }
+    let s = chrOf(code).lowercase()
+    if s.count == 1 { ordOf(s) } else { code }
+}
+
+fn rxUpper(_ code: Int) -> Int {
+    if code < 128 {
+        return if code >= 97 && code <= 122 { code - 32 } else { code }
+    }
+    let s = chrOf(code).uppercase()
+    if s.count == 1 { ordOf(s) } else { code }
+}
+
+fn rxIsDigit(_ c: Int) -> Bool {
+    c >= 48 && c <= 57
+}
+
+// A character of a word: a letter, a digit or `_`. Outside ASCII, what
+// isn't known to be punctuation, a symbol or a space counts as a letter.
+fn rxIsWord(_ c: Int, _ ascii: Bool) -> Bool {
+    if c < 128 {
+        return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 95
+    }
+    if ascii {
+        return false
+    }
+    if c < 0xC0 {
+        return c == 0xAA || c == 0xB5 || c == 0xBA || c == 0xB2 || c == 0xB3 || c == 0xB9 || (c >= 0xBC && c <= 0xBE)
+    }
+    if c == 0xD7 || c == 0xF7 {
+        return false
+    }
+    if (c >= 0x2000 && c <= 0x206F) || (c >= 0x20A0 && c <= 0x20CF) || (c >= 0x2190 && c <= 0x2BFF) {
+        return false
+    }
+    if (c >= 0x3000 && c <= 0x3004) || (c >= 0x3008 && c <= 0x3020) || c == 0x3030 || (c >= 0xFE10 && c <= 0xFE6F) {
+        return false
+    }
+    if (c >= 0xFF01 && c <= 0xFF0F) || (c >= 0xFF1A && c <= 0xFF20) || (c >= 0xFF3B && c <= 0xFF40) || (c >= 0xFF5B && c <= 0xFF65) {
+        return false
+    }
+    if c >= 0x1F000 && c <= 0x1FAFF {
+        return false
+    }
+    true
+}
+
+fn rxIsSpace(_ c: Int, _ ascii: Bool) -> Bool {
+    if c < 128 {
+        return c == 32 || (c >= 9 && c <= 13) || (!ascii && c >= 28 && c <= 31)
+    }
+    if ascii {
+        return false
+    }
+    c == 0x85 || c == 0xA0 || c == 0x1680 || (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000
+}
+
+fn rxSetHas(_ s: RxSet, _ c: Int) -> Bool {
+    var i = 0
+    while i < s.ranges.count {
+        if c >= s.ranges[i] && c <= s.ranges[i + 1] {
+            return true
+        }
+        i += 2
+    }
+    for k in s.kinds {
+        if k == 1 {
+            if rxIsDigit(c) {
+                return true
+            }
+        } else if k == 2 {
+            if !rxIsDigit(c) {
+                return true
+            }
+        } else if k == 3 {
+            if rxIsWord(c, s.ascii) {
+                return true
+            }
+        } else if k == 4 {
+            if !rxIsWord(c, s.ascii) {
+                return true
+            }
+        } else if k == 5 {
+            if rxIsSpace(c, s.ascii) {
+                return true
+            }
+        } else if !rxIsSpace(c, s.ascii) {
+            return true
+        }
+    }
+    false
+}
+
+// ---- parsing ----
+
+struct RxParser {
+    c: [String]
+    pos: Int = 0
+    flags: Int = 0
+    // The flags the pattern itself turned on: (?i).
+    ownFlags: Int = 0
+    nodes: [RxNode] = []
+    sets: [RxSet] = []
+    groups: Int = 0
+    names: [String] = []
+    nameGroups: [Int] = []
+    // The groups whose `)` hasn't come yet.
+    openGroups: [Int] = []
+    error: String = ""
+    errorPos: Int = -1
+    // The quantifier `readQuantifier` found.
+    least: Int = 0
+    most: Int = -1
+    // The item of a set `classItem` found: a kind of character, or a code.
+    itemKind: Int = 0
+    itemCode: Int = 0
+
+    fn fail(_ message: String, _ at: Int) {
+        if error == "" {
+            error = message
+            errorPos = at
+        }
+    }
+
+    fn add(_ node: RxNode) -> Int {
+        nodes.append(node)
+        nodes.count - 1
+    }
+
+    // With VERBOSE, spaces and `# comments` aren't part of the pattern.
+    fn skipVerbose() {
+        if (flags & 64) == 0 {
+            return
+        }
+        while pos < c.count {
+            let ch = c[pos]
+            if ch == " " || ch == "\t" || ch == "\n" || ch == "\r" || ordOf(ch) == 11 || ordOf(ch) == 12 {
+                pos += 1
+            } else if ch == "#" {
+                while pos < c.count && c[pos] != "\n" {
+                    pos += 1
+                }
+            } else {
+                break
+            }
+        }
+    }
+
+    // a|b|c
+    fn alternatives() -> Int {
+        var items = [sequence()]
+        while error == "" && pos < c.count && c[pos] == "|" {
+            pos += 1
+            items.append(sequence())
+        }
+        if items.count == 1 {
+            return items[0]
+        }
+        add(.alt(items: items))
+    }
+
+    fn sequence() -> Int {
+        var items: [Int] = []
+        while error == "" {
+            skipVerbose()
+            if pos >= c.count {
+                break
+            }
+            let ch = c[pos]
+            if ch == "|" || ch == ")" {
+                break
+            }
+            let node = atom()
+            if error != "" {
+                break
+            }
+            if node < 0 {
+                continue
+            }
+            items.append(quantified(node))
+        }
+        if items.count == 1 {
+            return items[0]
+        }
+        if items.isEmpty {
+            return add(.empty)
+        }
+        add(.seq(items: items))
+    }
+
+    // A quantifier at `pos`: * + ? {m} {m,} {,n} {m,n}. Sets `least` and
+    // `most` and moves past it; false (without moving) if there's none.
+    fn readQuantifier() -> Bool {
+        if pos >= c.count {
+            return false
+        }
+        let ch = c[pos]
+        if ch == "*" || ch == "+" || ch == "?" {
+            least = if ch == "+" { 1 } else { 0 }
+            most = if ch == "?" { 1 } else { -1 }
+            pos += 1
+            return true
+        }
+        if ch != "\{" {
+            return false
+        }
+        var p = pos + 1
+        if p < c.count && c[p] == "\}" {
+            return false
+        }
+        var lo = ""
+        while p < c.count && isDigitChar(c[p]) {
+            lo += c[p]
+            p += 1
+        }
+        var hi = lo
+        if p < c.count && c[p] == "," {
+            p += 1
+            hi = ""
+            while p < c.count && isDigitChar(c[p]) {
+                hi += c[p]
+                p += 1
+            }
+        }
+        if p >= c.count || c[p] != "\}" {
+            return false
+        }
+        let start = pos
+        pos = p + 1
+        if lo.count > 5 || hi.count > 5 {
+            fail("the repetition number is too large", start)
+            return true
+        }
+        least = Int(lo) ?? 0
+        most = if hi == "" { -1 } else { Int(hi) ?? 0 }
+        if most >= 0 && most < least {
+            fail("min repeat greater than max repeat", start + 1)
+        }
+        true
+    }
+
+    // An item with the quantifiers after it: a*, a+?, a{2,3}.
+    fn quantified(_ first: Int) -> Int {
+        var node = first
+        var repeated = false
+        while error == "" {
+            skipVerbose()
+            let at = pos
+            if !readQuantifier() {
+                break
+            }
+            if error != "" {
+                break
+            }
+            if repeated {
+                fail("multiple repeat", at)
+                break
+            }
+            match nodes[node] {
+                .assert(_) -> { fail("nothing to repeat", at) }
+                _ -> {}
+            }
+            var greedy = true
+            if pos < c.count && c[pos] == "?" {
+                greedy = false
+                pos += 1
+            }
+            node = add(.repeat(body: node, least: least, most: most, greedy: greedy))
+            repeated = true
+        }
+        node
+    }
+
+    // One item: a character, a set, a group, an escape. -1 for what adds
+    // nothing to the pattern: (?i), (?#a comment).
+    fn atom() -> Int {
+        let at = pos
+        let ch = c[pos]
+        if ch == "(" {
+            return group()
+        }
+        if ch == "[" {
+            return charSet()
+        }
+        if ch == "\\" {
+            return escape()
+        }
+        if ch == "*" || ch == "+" || ch == "?" {
+            fail("nothing to repeat", at)
+            return -1
+        }
+        if ch == "\{" {
+            if readQuantifier() {
+                fail("nothing to repeat", at)
+                return -1
+            }
+        }
+        pos += 1
+        if ch == "." {
+            return add(.any(all: (flags & 16) != 0))
+        }
+        if ch == "^" {
+            return add(.assert(kind: if (flags & 8) != 0 { 10 } else { 9 }))
+        }
+        if ch == "$" {
+            return add(.assert(kind: if (flags & 8) != 0 { 12 } else { 11 }))
+        }
+        literal(ordOf(ch))
+    }
+
+    fn literal(_ code: Int) -> Int {
+        if (flags & 2) != 0 {
+            let low = rxLower(code)
+            if low != code || rxUpper(code) != code {
+                return add(.char(code: low, icase: true))
+            }
+        }
+        add(.char(code: code, icase: false))
+    }
+
+    fn kindSet(_ kind: Int) -> Int {
+        sets.append(RxSet(kinds: [kind], ascii: (flags & 256) != 0))
+        add(.set(id: sets.count - 1))
+    }
+
+    // A group's name, up to `closer`.
+    fn groupName(_ closer: String) -> String {
+        let start = pos
+        var name = ""
+        while pos < c.count && c[pos] != closer {
+            name += c[pos]
+            pos += 1
+        }
+        if pos >= c.count {
+            fail("missing {closer}, unterminated name", start)
+            return ""
+        }
+        pos += 1
+        if name == "" {
+            fail("missing group name", start)
+            return ""
+        }
+        let letters = name.characters
+        var ok = isNameStart(letters[0])
+        for l in letters {
+            if !isNameChar(l) {
+                ok = false
+            }
+        }
+        if !ok {
+            fail("bad character in group name {strRepr(name)}", start)
+            return ""
+        }
+        name
+    }
+
+    fn flagBit(_ letter: String) -> Int {
+        match letter {
+            "i" -> 2
+            "L" -> 4
+            "m" -> 8
+            "s" -> 16
+            "u" -> 32
+            "x" -> 64
+            "a" -> 256
+            _ -> 0
+        }
+    }
+
+    // What's after a group's body: its `)`.
+    fn closeGroup(_ start: Int) {
+        if error != "" {
+            return
+        }
+        if pos >= c.count || c[pos] != ")" {
+            fail("missing ), unterminated subpattern", start)
+            return
+        }
+        pos += 1
+    }
+
+    // ( … ) and every (? … ).
+    fn group() -> Int {
+        let start = pos
+        pos += 1
+        if pos < c.count && c[pos] == "?" {
+            pos += 1
+            if pos >= c.count {
+                fail("unexpected end of pattern", pos)
+                return -1
+            }
+            let ch = c[pos]
+            pos += 1
+            if ch == ":" {
+                let body = alternatives()
+                closeGroup(start)
+                return body
+            }
+            if ch == "P" {
+                if pos >= c.count {
+                    fail("unexpected end of pattern", pos)
+                    return -1
+                }
+                let kind = c[pos]
+                pos += 1
+                if kind == "<" {
+                    let nameAt = pos
+                    let name = groupName(">")
+                    if error != "" {
+                        return -1
+                    }
+                    if let seen = names.index(of: name) {
+                        fail("redefinition of group name {strRepr(name)} as group {groups + 1}; was group {nameGroups[seen]}", nameAt)
+                        return -1
+                    }
+                    groups += 1
+                    let index = groups
+                    names.append(name)
+                    nameGroups.append(index)
+                    openGroups.append(index)
+                    let body = alternatives()
+                    openGroups.removeLast()
+                    closeGroup(start)
+                    return add(.group(index: index, body: body))
+                }
+                if kind == "=" {
+                    let nameAt = pos
+                    let name = groupName(")")
+                    if error != "" {
+                        return -1
+                    }
+                    if let seen = names.index(of: name) {
+                        let index = nameGroups[seen]
+                        if openGroups.contains(index) {
+                            fail("cannot refer to an open group", nameAt)
+                            return -1
+                        }
+                        return add(.backref(group: index, icase: (flags & 2) != 0))
+                    }
+                    fail("unknown group name {strRepr(name)}", nameAt)
+                    return -1
+                }
+                fail("unknown extension ?P{kind}", start + 1)
+                return -1
+            }
+            if ch == "=" || ch == "!" {
+                let body = alternatives()
+                closeGroup(start)
+                return add(.look(body: body, behind: false, negate: ch == "!"))
+            }
+            if ch == "<" {
+                if pos >= c.count {
+                    fail("unexpected end of pattern", pos)
+                    return -1
+                }
+                let kind = c[pos]
+                pos += 1
+                if kind != "=" && kind != "!" {
+                    fail("unknown extension ?<{kind}", start + 1)
+                    return -1
+                }
+                let body = alternatives()
+                closeGroup(start)
+                return add(.look(body: body, behind: true, negate: kind == "!"))
+            }
+            if ch == "#" {
+                while pos < c.count && c[pos] != ")" {
+                    pos += 1
+                }
+                if pos >= c.count {
+                    fail("missing ), unterminated comment", start)
+                    return -1
+                }
+                pos += 1
+                return -1
+            }
+            if ch == "(" {
+                fail("conditional groups (?(…)…) aren't supported", start)
+                return -1
+            }
+            if flagBit(ch) != 0 || ch == "-" {
+                // (?i) for the whole pattern, (?i:…) and (?-i:…) for a part.
+                pos -= 1
+                var on = 0
+                var off = 0
+                var turningOff = false
+                while pos < c.count {
+                    let f = c[pos]
+                    if f == "-" && !turningOff {
+                        turningOff = true
+                        pos += 1
+                        continue
+                    }
+                    let bit = flagBit(f)
+                    if bit == 0 {
+                        break
+                    }
+                    if turningOff {
+                        off = off | bit
+                    } else {
+                        on = on | bit
+                    }
+                    pos += 1
+                }
+                if pos >= c.count {
+                    fail("missing -, : or )", pos)
+                    return -1
+                }
+                if c[pos] == ")" && !turningOff {
+                    pos += 1
+                    flags = flags | on
+                    ownFlags = ownFlags | on
+                    return -1
+                }
+                if c[pos] == ":" {
+                    pos += 1
+                    let saved = flags
+                    flags = (flags | on) & ~off
+                    let body = alternatives()
+                    flags = saved
+                    closeGroup(start)
+                    return body
+                }
+                fail("unknown flag", pos)
+                return -1
+            }
+            fail("unknown extension ?{ch}", start + 1)
+            return -1
+        }
+        groups += 1
+        let index = groups
+        openGroups.append(index)
+        let body = alternatives()
+        openGroups.removeLast()
+        closeGroup(start)
+        add(.group(index: index, body: body))
+    }
+
+    fn hexEscape(_ digits: Int, _ at: Int) -> Int {
+        var text = ""
+        while text.count < digits && pos < c.count && isHexChar(c[pos]) {
+            text += c[pos]
+            pos += 1
+        }
+        if text.count < digits {
+            fail("incomplete escape {c.slice(from: at, to: pos).joined()}", at)
+            return 0
+        }
+        hexValue(text)
+    }
+
+    fn isOctal(_ ch: String) -> Bool {
+        ch >= "0" && ch <= "7" && ch.count == 1
+    }
+
+    // An escape that stands for one character: \n, \x41, \., \\. `e` is
+    // the character after the backslash (already passed).
+    fn charEscape(_ e: String, _ at: Int) -> Int {
+        match e {
+            "n" -> { return 10 }
+            "t" -> { return 9 }
+            "r" -> { return 13 }
+            "f" -> { return 12 }
+            "v" -> { return 11 }
+            "a" -> { return 7 }
+            "x" -> { return hexEscape(2, at) }
+            "u" -> { return hexEscape(4, at) }
+            "U" -> { return hexEscape(8, at) }
+            _ -> {}
+        }
+        if isDigitChar(e) {
+            // \0, \012: a character by its number in base 8.
+            var value = Int(e) ?? 0
+            var count = 1
+            while count < 3 && pos < c.count && isOctal(c[pos]) && isOctal(e) {
+                value = value * 8 + (Int(c[pos]) ?? 0)
+                pos += 1
+                count += 1
+            }
+            if value > 255 {
+                fail("octal escape value {c.slice(from: at, to: pos).joined()} outside of range 0-0o377", at)
+            }
+            return value
+        }
+        let code = ordOf(e)
+        if (code >= 65 && code <= 90) || (code >= 97 && code <= 122) {
+            fail("bad escape \\{e}", at)
+            return 0
+        }
+        code
+    }
+
+    // \d, \b, \1, \n, \. outside a set.
+    fn escape() -> Int {
+        let at = pos
+        pos += 1
+        if pos >= c.count {
+            fail("bad escape (end of pattern)", at)
+            return -1
+        }
+        let e = c[pos]
+        pos += 1
+        match e {
+            "d" -> { return kindSet(1) }
+            "D" -> { return kindSet(2) }
+            "w" -> { return kindSet(3) }
+            "W" -> { return kindSet(4) }
+            "s" -> { return kindSet(5) }
+            "S" -> { return kindSet(6) }
+            "b" -> { return add(.assert(kind: 15)) }
+            "B" -> { return add(.assert(kind: 16)) }
+            "A" -> { return add(.assert(kind: 13)) }
+            "Z" -> { return add(.assert(kind: 14)) }
+            _ -> {}
+        }
+        if isDigitChar(e) && e != "0" {
+            var number = Int(e) ?? 0
+            if pos < c.count && isDigitChar(c[pos]) {
+                if isOctal(e) && isOctal(c[pos]) && pos + 1 < c.count && isOctal(c[pos + 1]) {
+                    // Three digits of base 8: a character.
+                    let value = number * 64 + (Int(c[pos]) ?? 0) * 8 + (Int(c[pos + 1]) ?? 0)
+                    pos += 2
+                    if value > 255 {
+                        fail("octal escape value {c.slice(from: at, to: pos).joined()} outside of range 0-0o377", at)
+                        return -1
+                    }
+                    return literal(value)
+                }
+                number = number * 10 + (Int(c[pos]) ?? 0)
+                pos += 1
+            }
+            if number > groups {
+                fail("invalid group reference {number}", at + 1)
+                return -1
+            }
+            if openGroups.contains(number) {
+                fail("cannot refer to an open group", at)
+                return -1
+            }
+            return add(.backref(group: number, icase: (flags & 2) != 0))
+        }
+        let code = charEscape(e, at)
+        if error != "" {
+            return -1
+        }
+        literal(code)
+    }
+
+    // An item of a set, at `pos`: a character or an escape. Sets
+    // `itemKind` (0 for a character, whose code is in `itemCode`).
+    fn classItem() {
+        let ch = c[pos]
+        itemKind = 0
+        if ch != "\\" {
+            itemCode = ordOf(ch)
+            pos += 1
+            return
+        }
+        let at = pos
+        pos += 1
+        if pos >= c.count {
+            fail("bad escape (end of pattern)", at)
+            return
+        }
+        let e = c[pos]
+        pos += 1
+        match e {
+            "d" -> { itemKind = 1 }
+            "D" -> { itemKind = 2 }
+            "w" -> { itemKind = 3 }
+            "W" -> { itemKind = 4 }
+            "s" -> { itemKind = 5 }
+            "S" -> { itemKind = 6 }
+            "b" -> { itemCode = 8 }
+            _ -> { itemCode = charEscape(e, at) }
+        }
+    }
+
+    // [abc], [a-z], [^0-9], [\w.-]
+    fn charSet() -> Int {
+        let start = pos
+        pos += 1
+        var s = RxSet(ignoreCase: (flags & 2) != 0, ascii: (flags & 256) != 0)
+        if pos < c.count && c[pos] == "^" {
+            s.negate = true
+            pos += 1
+        }
+        var first = true
+        while error == "" {
+            if pos >= c.count {
+                fail("unterminated character set", start)
+                return -1
+            }
+            if c[pos] == "]" && !first {
+                pos += 1
+                break
+            }
+            first = false
+            let itemAt = pos
+            classItem()
+            if error != "" {
+                return -1
+            }
+            let kind = itemKind
+            let low = itemCode
+            let lowEnd = pos
+            if pos + 1 < c.count && c[pos] == "-" && c[pos + 1] != "]" {
+                pos += 1
+                let highAt = pos
+                classItem()
+                if error != "" {
+                    return -1
+                }
+                let range = c.slice(from: itemAt, to: lowEnd).joined() + "-" + c.slice(from: highAt, to: pos).joined()
+                if kind != 0 || itemKind != 0 || itemCode < low {
+                    fail("bad character range {range}", itemAt)
+                    return -1
+                }
+                s.ranges.append(low)
+                s.ranges.append(itemCode)
+            } else if kind != 0 {
+                s.kinds.append(kind)
+            } else {
+                s.ranges.append(low)
+                s.ranges.append(low)
+            }
+        }
+        sets.append(s)
+        add(.set(id: sets.count - 1))
+    }
+}
+
+// ---- writing the program ----
+
+struct RxCompiler {
+    nodes: [RxNode]
+    prog: RxProgram = RxProgram()
+    error: String = ""
+
+    fn put(_ op: Int, _ x: Int, _ y: Int) -> Int {
+        prog.op.append(op)
+        prog.x.append(x)
+        prog.y.append(y)
+        prog.op.count - 1
+    }
+
+    // How many characters a node matches, or -1 if that's not always
+    // the same number.
+    fn width(_ n: Int) -> Int {
+        match nodes[n] {
+            .empty -> { return 0 }
+            .char(_, _) -> { return 1 }
+            .any(_) -> { return 1 }
+            .set(_) -> { return 1 }
+            .seq(items) -> {
+                var total = 0
+                for i in items {
+                    let w = width(i)
+                    if w < 0 {
+                        return -1
+                    }
+                    total += w
+                }
+                return total
+            }
+            .alt(items) -> {
+                var same = -1
+                for i in items {
+                    let w = width(i)
+                    if w < 0 || (same >= 0 && w != same) {
+                        return -1
+                    }
+                    same = w
+                }
+                return same
+            }
+            .group(_, body) -> { return width(body) }
+            .repeat(body, least, most, _) -> {
+                if least != most {
+                    return -1
+                }
+                let w = width(body)
+                return if w < 0 { -1 } else { w * least }
+            }
+            .assert(_) -> { return 0 }
+            .backref(_, _) -> { return -1 }
+            .look(_, _, _) -> { return 0 }
+        }
+    }
+
+    // Whether a node can match no characters at all.
+    fn canBeEmpty(_ n: Int) -> Bool {
+        match nodes[n] {
+            .empty -> { return true }
+            .char(_, _) -> { return false }
+            .any(_) -> { return false }
+            .set(_) -> { return false }
+            .seq(items) -> {
+                for i in items {
+                    if !canBeEmpty(i) {
+                        return false
+                    }
+                }
+                return true
+            }
+            .alt(items) -> {
+                for i in items {
+                    if canBeEmpty(i) {
+                        return true
+                    }
+                }
+                return false
+            }
+            .group(_, body) -> { return canBeEmpty(body) }
+            .repeat(body, least, _, _) -> { return least == 0 || canBeEmpty(body) }
+            .assert(_) -> { return true }
+            .backref(_, _) -> { return true }
+            .look(_, _, _) -> { return true }
+        }
+    }
+
+    fn emit(_ n: Int) {
+        if error != "" {
+            return
+        }
+        if prog.op.count > 200000 {
+            error = "the pattern is too large"
+            return
+        }
+        match nodes[n] {
+            .empty -> {}
+            .char(code, icase) -> {
+                if icase {
+                    prog.needsCase = true
+                }
+                put(if icase { 2 } else { 1 }, code, 0)
+            }
+            .any(all) -> {
+                put(if all { 4 } else { 3 }, 0, 0)
+            }
+            .set(id) -> {
+                if prog.sets[id].ignoreCase {
+                    prog.needsCase = true
+                }
+                put(5, id, 0)
+            }
+            .seq(items) -> {
+                for i in items {
+                    emit(i)
+                }
+            }
+            .alt(items) -> {
+                var exits: [Int] = []
+                for i in items.indices {
+                    if i < items.count - 1 {
+                        let split = put(6, 0, 0)
+                        prog.x[split] = prog.op.count
+                        emit(items[i])
+                        exits.append(put(7, 0, 0))
+                        prog.y[split] = prog.op.count
+                    } else {
+                        emit(items[i])
+                    }
+                }
+                for e in exits {
+                    prog.x[e] = prog.op.count
+                }
+            }
+            .group(index, body) -> {
+                put(8, index * 2, 0)
+                emit(body)
+                put(8, index * 2 + 1, 0)
+            }
+            .repeat(body, least, most, greedy) -> {
+                if least > 0 {
+                    for _ in 0..least {
+                        emit(body)
+                    }
+                }
+                if most < 0 {
+                    // A loop: the body again, or what's after it. A body
+                    // that can match nothing would go round for ever: the
+                    // loop is left when a turn didn't move.
+                    let top = put(6, 0, 0)
+                    let careful = canBeEmpty(body)
+                    var register = -1
+                    if careful {
+                        register = prog.registers
+                        prog.registers += 1
+                        put(23, register, 0)
+                    }
+                    emit(body)
+                    var check = -1
+                    if careful {
+                        check = put(24, register, 0)
+                    }
+                    put(7, top, 0)
+                    let after = prog.op.count
+                    if greedy {
+                        prog.x[top] = top + 1
+                        prog.y[top] = after
+                    } else {
+                        prog.x[top] = after
+                        prog.y[top] = top + 1
+                    }
+                    if check >= 0 {
+                        prog.y[check] = after
+                    }
+                } else if most > least {
+                    // Up to `most - least` more, each one optional.
+                    var splits: [Int] = []
+                    for _ in 0..(most - least) {
+                        splits.append(put(6, 0, 0))
+                        emit(body)
+                        if error != "" {
+                            return
+                        }
+                    }
+                    let after = prog.op.count
+                    for s in splits {
+                        if greedy {
+                            prog.x[s] = s + 1
+                            prog.y[s] = after
+                        } else {
+                            prog.x[s] = after
+                            prog.y[s] = s + 1
+                        }
+                    }
+                }
+            }
+            .assert(kind) -> {
+                put(kind, 0, 0)
+            }
+            .backref(group, icase) -> {
+                if icase {
+                    prog.needsCase = true
+                }
+                put(if icase { 18 } else { 17 }, group, 0)
+            }
+            .look(body, behind, negate) -> {
+                var w = 0
+                if behind {
+                    w = width(body)
+                    if w < 0 {
+                        error = "look-behind requires fixed-width pattern"
+                        return
+                    }
+                }
+                let op = if behind { if negate { 22 } else { 21 } } else { if negate { 20 } else { 19 } }
+                let at = put(op, w, 0)
+                emit(body)
+                put(0, 0, 0)
+                prog.y[at] = prog.op.count
+            }
+        }
+    }
+}
+
+// re.compile(pattern, flags): gives (number, groups, names, their groups,
+// flags) for a pattern that's right, and (message, position) for one
+// that's wrong.
+fn rxCompile(_ it: bind Interp, _ pattern: String, _ flags: Int) -> Value {
+    var parser = RxParser(c: pattern.characters, flags: flags)
+    let root = parser.alternatives()
+    if parser.error == "" && parser.pos < parser.c.count {
+        parser.fail("unbalanced parenthesis", parser.pos)
+    }
+    if parser.error != "" {
+        return it.newTuple([.str(s: parser.error), .int(i: parser.errorPos)])
+    }
+    var compiler = RxCompiler(nodes: parser.nodes)
+    compiler.prog.sets = parser.sets
+    compiler.emit(root)
+    compiler.put(0, 0, 0)
+    if compiler.error != "" {
+        return it.newTuple([.str(s: compiler.error), .int(i: -1)])
+    }
+    var prog = compiler.prog
+    prog.groups = parser.groups
+    prog.flags = flags | parser.ownFlags
+    // What every match starts with, to look for where one can start.
+    var first = 0
+    while prog.op[first] == 8 {
+        first += 1
+    }
+    if prog.op[first] == 1 {
+        prog.firstChar = prog.x[first]
+    }
+    if prog.op[first] == 9 || prog.op[first] == 13 {
+        prog.anchored = true
+    }
+    it.rx.programs.append(prog)
+    var names: [Value] = []
+    var numbers: [Value] = []
+    for i in parser.names.indices {
+        names.append(.str(s: parser.names[i]))
+        numbers.append(.int(i: parser.nameGroups[i]))
+    }
+    it.newTuple([.int(i: it.rx.programs.count - 1), .int(i: prog.groups), it.newTuple(names), it.newTuple(numbers),
+                 Value.int(i: prog.flags)])
+}
+
+// ---- matching ----
+
+// A program being run against a text.
+struct RxMatcher {
+    // The text's characters as numbers, and (when letters are compared
+    // in either case) as small and as capital letters.
+    codes: [Int]
+    lower: [Int] = []
+    upper: [Int] = []
+    // Where the text ends, for the pattern (`endpos`).
+    end: Int = 0
+    // Where each group starts and ends (-1: it didn't match), then the
+    // number of the group that closed last.
+    caps: [Int] = []
+    regs: [Int] = []
+    // The notes to come back to: three numbers each. (place in the
+    // program, place in the text, 0) is another way to go on; (slot, old
+    // value, 1 or 2) puts back a group's place or a loop's; (which, 0, 3)
+    // puts back all the groups as they were before a lookahead.
+    stack: [Int] = []
+    snaps: [[Int]] = []
+    steps: Int = 0
+    // The script's budget ran out: the match was given up.
+    stopped: Bool = false
+    // The match must go to the end of the text (fullmatch).
+    whole: Bool = false
+    // The match may not be empty (just after an empty match, in findall).
+    mustAdvance: Bool = false
+}
+
+fn rxWordAt(_ m: RxMatcher, _ at: Int, _ ascii: Bool) -> Bool {
+    at >= 0 && at < m.end && rxIsWord(m.codes[at], ascii)
+}
+
+// Runs the program from step `startPc` at place `startSp` of the text.
+// Gives where the match ends, or -1. `top` is false for the inside of a
+// lookahead or lookbehind.
+fn rxRun(_ it: bind Interp, _ p: RxProgram, _ m: bind RxMatcher, _ startPc: Int, _ startSp: Int, _ top: Bool) -> Int {
+    let base = m.stack.count
+    let ascii = (p.flags & 256) != 0
+    let last = m.caps.count - 1
+    var pc = startPc
+    var sp = startSp
+    while true {
+        m.steps += 1
+        if (m.steps & 255) == 0 {
+            if !it.spend() {
+                m.stopped = true
+                return -1
+            }
+        }
+        var ok = true
+        let o = p.op[pc]
+        match o {
+            1 -> {
+                if sp < m.end && m.codes[sp] == p.x[pc] {
+                    sp += 1
+                    pc += 1
+                } else {
+                    ok = false
+                }
+            }
+            6 -> {
+                m.stack.append(p.y[pc])
+                m.stack.append(sp)
+                m.stack.append(0)
+                pc = p.x[pc]
+            }
+            7 -> { pc = p.x[pc] }
+            5 -> {
+                if sp < m.end {
+                    let s = p.sets[p.x[pc]]
+                    var hit = rxSetHas(s, m.codes[sp])
+                    if !hit && s.ignoreCase {
+                        hit = rxSetHas(s, m.lower[sp]) || rxSetHas(s, m.upper[sp])
+                    }
+                    if hit != s.negate {
+                        sp += 1
+                        pc += 1
+                    } else {
+                        ok = false
+                    }
+                } else {
+                    ok = false
+                }
+            }
+            3 -> {
+                if sp < m.end && m.codes[sp] != 10 {
+                    sp += 1
+                    pc += 1
+                } else {
+                    ok = false
+                }
+            }
+            4 -> {
+                if sp < m.end {
+                    sp += 1
+                    pc += 1
+                } else {
+                    ok = false
+                }
+            }
+            2 -> {
+                if sp < m.end && m.lower[sp] == p.x[pc] {
+                    sp += 1
+                    pc += 1
+                } else {
+                    ok = false
+                }
+            }
+            8 -> {
+                let slot = p.x[pc]
+                m.stack.append(slot)
+                m.stack.append(m.caps[slot])
+                m.stack.append(1)
+                m.caps[slot] = sp
+                if (slot & 1) == 1 {
+                    // A group closed: it's the last one that did.
+                    m.stack.append(last)
+                    m.stack.append(m.caps[last])
+                    m.stack.append(1)
+                    m.caps[last] = slot / 2
+                }
+                pc += 1
+            }
+            0 -> {
+                if top && ((m.whole && sp != m.end) || (m.mustAdvance && sp == startSp)) {
+                    ok = false
+                } else {
+                    // (The notes are dropped; the groups stay as they are.)
+                    m.stack = m.stack.prefix(base)
+                    return sp
+                }
+            }
+            9 -> {
+                if sp == 0 {
+                    pc += 1
+                } else {
+                    ok = false
+                }
+            }
+            10 -> {
+                if sp == 0 || m.codes[sp - 1] == 10 {
+                    pc += 1
+                } else {
+                    ok = false
+                }
+            }
+            11 -> {
+                if sp == m.end || (sp == m.end - 1 && m.codes[sp] == 10) {
+                    pc += 1
+                } else {
+                    ok = false
+                }
+            }
+            12 -> {
+                if sp == m.end || m.codes[sp] == 10 {
+                    pc += 1
+                } else {
+                    ok = false
+                }
+            }
+            13 -> {
+                if sp == 0 {
+                    pc += 1
+                } else {
+                    ok = false
+                }
+            }
+            14 -> {
+                if sp == m.end {
+                    pc += 1
+                } else {
+                    ok = false
+                }
+            }
+            15 -> {
+                if rxWordAt(m, sp - 1, ascii) != rxWordAt(m, sp, ascii) {
+                    pc += 1
+                } else {
+                    ok = false
+                }
+            }
+            16 -> {
+                if rxWordAt(m, sp - 1, ascii) == rxWordAt(m, sp, ascii) {
+                    pc += 1
+                } else {
+                    ok = false
+                }
+            }
+            17 -> {
+                let from = m.caps[p.x[pc] * 2]
+                let to = m.caps[p.x[pc] * 2 + 1]
+                if from < 0 || to < 0 || sp + (to - from) > m.end {
+                    ok = false
+                } else {
+                    var i = 0
+                    while i < to - from && m.codes[from + i] == m.codes[sp + i] {
+                        i += 1
+                    }
+                    if i == to - from {
+                        sp += i
+                        pc += 1
+                    } else {
+                        ok = false
+                    }
+                }
+            }
+            18 -> {
+                let from = m.caps[p.x[pc] * 2]
+                let to = m.caps[p.x[pc] * 2 + 1]
+                if from < 0 || to < 0 || sp + (to - from) > m.end {
+                    ok = false
+                } else {
+                    var i = 0
+                    while i < to - from && m.lower[from + i] == m.lower[sp + i] {
+                        i += 1
+                    }
+                    if i == to - from {
+                        sp += i
+                        pc += 1
+                    } else {
+                        ok = false
+                    }
+                }
+            }
+            19 -> {
+                let before = m.caps
+                let found = rxRun(it, p, m, pc + 1, sp, false)
+                if m.stopped {
+                    return -1
+                }
+                if found >= 0 {
+                    // (The groups it set stay, until this is come back over.)
+                    m.snaps.append(before)
+                    m.stack.append(m.snaps.count - 1)
+                    m.stack.append(0)
+                    m.stack.append(3)
+                    pc = p.y[pc]
+                } else {
+                    m.caps = before
+                    ok = false
+                }
+            }
+            20 -> {
+                let before = m.caps
+                let found = rxRun(it, p, m, pc + 1, sp, false)
+                if m.stopped {
+                    return -1
+                }
+                m.caps = before
+                if found >= 0 {
+                    ok = false
+                } else {
+                    pc = p.y[pc]
+                }
+            }
+            21 -> {
+                let from = sp - p.x[pc]
+                var found = -1
+                let before = m.caps
+                if from >= 0 {
+                    found = rxRun(it, p, m, pc + 1, from, false)
+                    if m.stopped {
+                        return -1
+                    }
+                }
+                if found == sp {
+                    m.snaps.append(before)
+                    m.stack.append(m.snaps.count - 1)
+                    m.stack.append(0)
+                    m.stack.append(3)
+                    pc = p.y[pc]
+                } else {
+                    m.caps = before
+                    ok = false
+                }
+            }
+            22 -> {
+                let from = sp - p.x[pc]
+                var found = -1
+                let before = m.caps
+                if from >= 0 {
+                    found = rxRun(it, p, m, pc + 1, from, false)
+                    if m.stopped {
+                        return -1
+                    }
+                }
+                m.caps = before
+                if found == sp {
+                    ok = false
+                } else {
+                    pc = p.y[pc]
+                }
+            }
+            23 -> {
+                let r = p.x[pc]
+                m.stack.append(r)
+                m.stack.append(m.regs[r])
+                m.stack.append(2)
+                m.regs[r] = sp
+                pc += 1
+            }
+            24 -> {
+                if sp == m.regs[p.x[pc]] {
+                    pc = p.y[pc]
+                } else {
+                    pc += 1
+                }
+            }
+            _ -> { ok = false }
+        }
+        if !ok {
+            // Back to the last other way to go on, undoing what was
+            // noted since.
+            var resumed = false
+            while m.stack.count > base {
+                let kind = m.stack.removeLast()
+                let b = m.stack.removeLast()
+                let a = m.stack.removeLast()
+                if kind == 0 {
+                    pc = a
+                    sp = b
+                    resumed = true
+                    break
+                }
+                if kind == 1 {
+                    m.caps[a] = b
+                } else if kind == 2 {
+                    m.regs[a] = b
+                } else {
+                    m.caps = m.snaps[a]
+                }
+            }
+            if !resumed {
+                return -1
+            }
+        }
+    }
+    -1
+}
+
+// Looks for a match from `from` on: only there (`mode` 0), there and up
+// to the end (1), or at the first place there's one (2). The groups'
+// places are left in `m.caps`.
+fn rxFind(_ it: bind Interp, _ p: RxProgram, _ m: bind RxMatcher, _ from: Int, _ mode: Int) -> Bool {
+    var start = from
+    m.whole = mode == 1
+    while start <= m.end {
+        if mode == 2 && p.firstChar >= 0 {
+            while start < m.end && m.codes[start] != p.firstChar {
+                start += 1
+            }
+            if start >= m.end {
+                return false
+            }
+        }
+        var caps: [Int] = []
+        for _ in 0..(p.groups * 2 + 3) {
+            caps.append(-1)
+        }
+        m.caps = caps
+        if p.registers > 0 {
+            var regs: [Int] = []
+            for _ in 0..p.registers {
+                regs.append(-1)
+            }
+            m.regs = regs
+        }
+        m.stack = []
+        m.snaps = []
+        let end = rxRun(it, p, m, 0, start, true)
+        if m.stopped {
+            return false
+        }
+        if end >= 0 {
+            m.caps[0] = start
+            m.caps[1] = end
+            return true
+        }
+        if mode != 2 || p.anchored {
+            return false
+        }
+        m.mustAdvance = false
+        start += 1
+    }
+    false
+}
+
+// A text as the machine reads it, kept for the next time it's searched.
+fn rxSubject(_ it: bind Interp, _ text: String, _ withCase: Bool) {
+    if it.rx.known && it.rx.text == text && (it.rx.hasCase || !withCase) {
+        return
+    }
+    var codes: [Int] = []
+    var lower: [Int] = []
+    var upper: [Int] = []
+    for ch in text.characters {
+        let code = ordOf(ch)
+        codes.append(code)
+        if withCase {
+            lower.append(rxLower(code))
+            upper.append(rxUpper(code))
+        }
+    }
+    it.rx.text = text
+    it.rx.codes = codes
+    it.rx.lower = lower
+    it.rx.upper = upper
+    it.rx.hasCase = withCase
+    it.rx.known = true
+}
+
+// A match, for Python: where each group starts and ends, then the number
+// of the group that closed last (-1 for none).
+fn rxResult(_ it: bind Interp, _ m: RxMatcher) -> Value {
+    var out: [Value] = []
+    for i in 0..(m.caps.count - 1) {
+        out.append(.int(i: m.caps[i]))
+    }
+    // (The whole match isn't a group of its own.)
+    let closed = m.caps[m.caps.count - 1]
+    out.append(.int(i: if closed <= 0 { -1 } else { closed }))
+    it.newList(out)
+}
+
+// The `_re` module: compile(pattern, flags), match(pattern number, text,
+// pos, endpos, mode) and scan(pattern number, text, pos, endpos, limit),
+// which gives every match one after the other.
+fn rxCall(_ it: bind Interp, _ name: String, _ args: [Value]) -> Value {
+    if name == "compile" {
+        if args.count != 2 {
+            return it.throw("TypeError", "_re.compile() takes a pattern and flags")
+        }
+        match args[0] {
+            .str(pattern) -> { return rxCompile(it, pattern, intOf(args[1]) ?? 0) }
+            _ -> { return it.throw("TypeError", "first argument must be string or compiled pattern") }
+        }
+    }
+    if name != "match" && name != "scan" {
+        return it.throw("AttributeError", "module '_re' has no attribute '{name}'")
+    }
+    if args.count != 5 {
+        return it.throw("TypeError", "_re.{name}() takes 5 arguments")
+    }
+    let id = intOf(args[0]) ?? -1
+    if id < 0 || id >= it.rx.programs.count {
+        return it.throw("ValueError", "not a compiled pattern")
+    }
+    var text = ""
+    match args[1] {
+        .str(s) -> { text = s }
+        _ -> { return it.throw("TypeError", "expected string or bytes-like object") }
+    }
+    let p = it.rx.programs[id]
+    rxSubject(it, text, p.needsCase)
+    var m = RxMatcher(codes: it.rx.codes, lower: it.rx.lower, upper: it.rx.upper)
+    let count = m.codes.count
+    var from = intOf(args[2]) ?? 0
+    var end = intOf(args[3]) ?? count
+    if from < 0 {
+        from = 0
+    }
+    if end > count {
+        end = count
+    }
+    m.end = end
+    if name == "match" {
+        if from > end {
+            return Value.none
+        }
+        if rxFind(it, p, m, from, intOf(args[4]) ?? 0) {
+            return rxResult(it, m)
+        }
+        return Value.none
+    }
+    let limit = intOf(args[4]) ?? 0
+    var found: [Value] = []
+    var at = from
+    while at <= end && (limit <= 0 || found.count < limit) {
+        if !rxFind(it, p, m, at, 2) {
+            break
+        }
+        found.append(rxResult(it, m))
+        // (After an empty match, the next one there can't be empty too.)
+        at = m.caps[1]
+        m.mustAdvance = m.caps[0] == m.caps[1]
+    }
+    if it.signal != .none {
+        return Value.none
+    }
+    it.newList(found)
+}
