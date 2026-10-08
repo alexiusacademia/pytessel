@@ -162,11 +162,107 @@ struct Instance {
     fields: [String: Value] = [:]
 }
 
+// How an iterator finds its next value (`iterNext` in generators.tsl).
+enum IterMode {
+    // `items`, from `pos` on.
+    items
+    // The list `ref`, as it is when asked (it may grow meanwhile).
+    list
+    // The whole numbers from `pos` to `stop` by `step`.
+    range
+    // `function` of the next value of each of `sources`.
+    map
+    // The values of `sources[0]` that `function` says yes to.
+    filter
+    // A tuple of the next value of each of `sources`.
+    zip
+    // (`pos`, the next value of `sources[0]`).
+    enumerate
+    // What `function()` gives, until it gives `sentinel`.
+    sentinel
+    // The generator `ref` of `Interp.generators`, run up to its next `yield`.
+    generator
+    // A generator expression: the node `ref`, with its variables in `env`
+    // and the iterators of the `for` clauses it's inside of in `sources`.
+    genexpr
+    // `sources[0][pos]`, until an IndexError.
+    getitem
+}
+
+// What `iter`, `map`, `zip`, … and generators give: something that gives
+// one value each time it's asked.
 struct PyIter {
     items: [Value] = []
     pos: Int = 0
     // What it says it is: "list_iterator", "map", "generator", …
     kind: String = "iterator"
+    mode: IterMode = IterMode.items
+    sources: [Value] = []
+    function: Value = Value.none
+    sentinel: Value = Value.none
+    stop: Int = 0
+    step: Int = 1
+    ref: Int = -1
+    env: Int = -1
+    // (A generator expression: working out a value now; no more values.)
+    running: Bool = false
+    done: Bool = false
+    // (A generator expression's `self` and class, for what it calls.)
+    owner: Int = -1
+    receiver: Value = Value.none
+}
+
+// What a generator is in the middle of: a block of statements and how far
+// it is in it, for each statement it's inside of.
+enum FrameKind { block, whileLoop, forLoop, tryBlock, withBlock }
+
+struct GenFrame {
+    kind: FrameKind = FrameKind.block
+    // The statement the block is part of (not for a plain block).
+    node: Int = -1
+    body: [Int] = []
+    // The next statement of `body` to run.
+    pc: Int = 0
+    // A loop: 0 in its body, 1 in its `else`. A `try`: 0 in its body, 1 in
+    // an `except`, 2 in its `else`, 3 in its `finally`. A `with`: nothing.
+    phase: Int = 0
+    // A `for` loop's iterator, or a `with`'s manager.
+    held: Value = Value.none
+    // A `for` loop over a call of a generator function: the generator,
+    // to close if the loop is left early (-1 if it's not one).
+    closes: Int = -1
+    // What was on its way out when a `finally` block began, to go on
+    // with after it.
+    pending: Signal = Signal.none
+    pendingValue: Value = Value.none
+    pendingExc: Value = Value.none
+    lines: [Int] = []
+    names: [String] = []
+}
+
+// A generator: a call of a function with `yield`, which runs a piece at a
+// time. It keeps its variables (`env`) and where it is (`frames`) between
+// one `next` and the following one.
+struct Generator {
+    fnId: Int
+    env: Int
+    name: String
+    // The class and `self` of a method, as `Interp.curClass` and `curSelf`.
+    owner: Int = -1
+    receiver: Value = Value.none
+    frames: [GenFrame] = []
+    started: Bool = false
+    running: Bool = false
+    done: Bool = false
+    // The statement whose `yield` it's waiting at: what's sent in is that
+    // `yield`'s value, and the statement is finished with it.
+    resumeNode: Int = -1
+    // `yield from`: the iterator whose values it's passing on (or absent).
+    delegate: Value = Value.absent
+    // `target op= yield`: the target's parts and value, read before the yield.
+    held: [Value] = []
+    // The exceptions its `except` blocks are handling, while it waits.
+    handling: [Value] = []
 }
 
 struct PyFile {

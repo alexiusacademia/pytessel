@@ -13,6 +13,10 @@ struct Parser {
     errorLine: Int = 0
     // For each `def` being parsed, whether a `yield` was seen in it.
     yields: [Bool] = []
+    // For each node, whether it's a statement with a `yield` in it, and
+    // how many `yield`s the `def` being parsed has had so far.
+    yielding: [Bool] = []
+    yieldCount: Int = 0
 
     // ---- tokens ----
 
@@ -94,6 +98,7 @@ struct Parser {
     fn add(_ node: Node, _ at: Int) -> Int {
         nodes.append(node)
         lines.append(at)
+        yielding.append(false)
         nodes.count - 1
     }
 
@@ -117,8 +122,20 @@ struct Parser {
 
     // ---- statements ----
 
-    // One statement (or several on a line, with `;`), added to `out`.
+    // One statement (or several on a line, with `;`), added to `out`, and
+    // marked if a `yield` was read in it.
     fn statement(_ out: bind [Int]) {
+        let from = out.count
+        let before = yieldCount
+        plainStatement(out)
+        if yieldCount != before {
+            for i in from..out.count {
+                yielding[out[i]] = true
+            }
+        }
+    }
+
+    fn plainStatement(_ out: bind [Int]) {
         if kind() == .keyword {
             match text() {
                 "if" -> {
@@ -162,7 +179,12 @@ struct Parser {
     // Simple statements up to the end of the line.
     fn simpleLine(_ out: bind [Int]) {
         while error == "" {
-            out.append(simpleStatement())
+            let before = yieldCount
+            let one = simpleStatement()
+            if yieldCount != before {
+                yielding[one] = true
+            }
+            out.append(one)
             if acceptOp(";") {
                 if kind() == .newline || kind() == .eof {
                     break
@@ -212,7 +234,12 @@ struct Parser {
         let body = block()
         var orelse: [Int] = []
         if isKw("elif") {
-            orelse.append(ifStatement())
+            let before = yieldCount
+            let nested = ifStatement()
+            if yieldCount != before {
+                yielding[nested] = true
+            }
+            orelse.append(nested)
         } else if acceptKw("else") {
             orelse = block()
         }
@@ -321,7 +348,9 @@ struct Parser {
         def.name = name
         def.line = at
         yields.append(false)
+        let outerCount = yieldCount
         def.body = block()
+        yieldCount = outerCount
         def.isGenerator = yields.removeLast()
         defs.append(def)
         add(.funcDef(name: name, fnId: defs.count - 1, decorators: decorators), at)
@@ -728,7 +757,10 @@ struct Parser {
         } else {
             yields[yields.count - 1] = true
         }
-        acceptKw("from")
+        yieldCount += 1
+        if acceptKw("from") {
+            return add(.yieldFrom(value: expression()), at)
+        }
         var value = -1
         if kind() != .newline && kind() != .eof && !isOp(")") && !isOp(";") {
             value = expressionList()
@@ -745,7 +777,9 @@ struct Parser {
         def.isLambda = true
         def.line = at
         yields.append(false)
+        let outerCount = yieldCount
         def.body = [expression()]
+        yieldCount = outerCount
         yields.removeLast()
         defs.append(def)
         add(.lambda(fnId: defs.count - 1), at)
@@ -1415,11 +1449,13 @@ fn parseInto(_ program: bind Program, _ source: String) {
         program.errorLine = lexed.errorLine
         return
     }
-    var parser = Parser(tokens: lexed.tokens, nodes: program.nodes, lines: program.lines, defs: program.defs)
+    var parser = Parser(tokens: lexed.tokens, nodes: program.nodes, lines: program.lines, defs: program.defs,
+                        yielding: program.yielding)
     if parser.nodes.isEmpty {
         // (Node 0 stands in for what couldn't be parsed.)
         parser.nodes.append(.passStmt)
         parser.lines.append(0)
+        parser.yielding.append(false)
     }
     let body = parser.parseModule()
     if parser.error != "" {
@@ -1429,6 +1465,7 @@ fn parseInto(_ program: bind Program, _ source: String) {
     }
     program.nodes = parser.nodes
     program.lines = parser.lines
+    program.yielding = parser.yielding
     program.defs = parser.defs
     program.body = body
 }

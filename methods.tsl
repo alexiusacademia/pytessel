@@ -18,6 +18,7 @@ fn hasMethod(_ type: String, _ name: String) -> Bool {
         "int" -> ["bit_length", "is_integer", "conjugate"].contains(name)
         "float" -> ["is_integer", "conjugate"].contains(name)
         "bool" -> ["bit_length"].contains(name)
+        "generator" -> ["send", "throw", "close", "__next__", "__iter__"].contains(name)
         _ -> {
             if name == "__next__" || name == "__iter__" {
                 // (Iterators: generators, map, zip, …)
@@ -958,12 +959,15 @@ fn callMethod(_ it: bind Interp, _ receiver: Value, _ name: String, _ args: [Val
             it.throw("AttributeError", "'tuple' object has no attribute '{name}'")
         }
         .file(id) -> fileMethod(it, id, receiver, name, args)
-        .iterator(_) -> {
+        .iterator(id) -> {
             if name == "__next__" {
                 return callBuiltin(it, "next", [receiver], [], [])
             }
             if name == "__iter__" {
                 return receiver
+            }
+            if let result = generatorMethod(it, id, name, args) {
+                return result
             }
             it.throw("AttributeError", "'{typeName(it, receiver)}' object has no attribute '{name}'")
         }

@@ -1,0 +1,326 @@
+made generator
+  start
+1
+between
+  after 1
+2
+  after 2
+3
+  end
+stopped None
+still stopped
+still stopped
+default
+[]
+  start
+got 1
+  after 1
+got 2
+  after 2
+got 3
+  end
+0 1 2
+[10, 15, 20, 25, 30]
+[0, 1, 2, 3]
+first square over 50: 64
+[(0, 'a'), (1, 'b'), (2, 'c')]
+[('a', 100, 0), ('b', 101, -1)]
+[0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89]
+1597
+1
+value: result ('result',)
+value: 5
+[]
+mine ('mine', 2)
+None ()
+['negative', 'done']
+['zero', 'done']
+['positive', 'done']
+['positive', 'big', 'done']
+[(0, 0), (0, 1), (2, 0), (2, 1), (3, 0), (3, 1), 2, 4, 6, 7, 8, 'while else', 'for else']
+([1, 2, 3], 'all fine')
+([1], 'negative found')
+[4, 8, 12, 16, 20]
+[1, 2, 3, 4, 5]
+  producing 0
+  consuming 0
+  producing 1
+  consuming 1
+  producing 2
+  consuming 2
+None
+10.0 15.0 30.0
+ready
+got a
+got None
+ended: bye
+TypeError: can't send non-None value to a just-started generator
+None
+  x = 1
+None
+  y, z = 2 2
+pair
+  a, b = 3 4
+add
+  total = 105
+item
+  d = {'k': 7}
+last
+returned the end
+15
+waiting
+  caught bad
+recovered
+waiting
+  got 1
+waiting
+  caught worse
+recovered
+waiting
+  key error, leaving
+stop: left
+TypeError: after the end
+RuntimeError: out
+[]
+RuntimeError: before start
+[]
+  open a
+1
+  close a
+[]
+[]
+  open c
+  close c
+[1, 2]
+  open d
+  breaking
+  close d
+after the loop
+  open e
+  close e
+1
+  open f
+  close f
+  open g
+10
+  close g
+  open h
+still open: 2
+  close h
+  GeneratorExit seen
+None
+RuntimeError: generator ignored GeneratorExit
+None []
+None
+  finally with no yield
+(['in try', 'in except: oops', 'raised again', 'in finally', 'second try', 'in else', 0, 'finally 0', 'finally 1', 'finally 2', 'finally before return'], 'returned')
+1 cleanup
+  cleanup done
+KeyError: 'first'
+1
+  inner finally
+2
+  outer finally
+ValueError: x
+1
+still kept
+1
+ValueError: broken
+[]
+RuntimeError: generator raised StopIteration
+ValueError: generator already executing
+  enter a
+  enter b
+  enter c
+  exit c None
+  exit b None
+  exit a None
+  enter d
+  exit d ValueError
+  enter e
+  exit e None
+(['a', 'bc', 'after inner', 'in d', 'after d'], 'from with')
+  enter a
+a
+  exit a GeneratorExit
+  enter a
+  enter b
+  enter c
+bc
+  exit c KeyError
+  exit b KeyError
+  exit a KeyError
+KeyError came out
+  outer start
+inner 1
+  inner got A
+inner 2
+  inner got B
+  result: inner result
+10
+  inner got None
+  inner got None
+([20, 'a', 'b', 0, 1, 0, 1, 4, 'inner 1', 'inner 2'], 'INNER RESULT')
+[1, 2, 3, '4', '5', 6, 7, 8, 9]
+waiting
+  caught passed in
+recovered
+waiting
+  key error, leaving
+  through done
+through ended
+  through done
+  open inside
+1
+  close inside
+([1], 'result')
+[None]
+[3, 2, 1, 'liftoff']
+[20, 30, 35, 40, 45, 50, 60, 65, 70, 80]
+([(20, 2), (30, 1), (35, 3), (40, 2), (45, 3), (50, 0), (60, 2), (65, 3), (70, 1), (80, 2)], 10)
+20
+[1, 2, 3, 4, 5, 6, 7, 8]
+[[1, 2, 3, 4], [1, 2, 4, 3], [1, 3, 2, 4], [1, 3, 4, 2]]
+24
+made generator
+  noisy 0
+0
+  noisy 2
+20
+  noisy 4
+[40]
+[]
+4
+[(2, 1), (3, 0), (4, 2), (5, 1), (5, 4)]
+[0, 10, 20]
+[0, 3, 6]
+285 3
+0,1,2,3,4
+[0, 0, 0, 1, 1, 2, 2]
+{0: 0, 1: 1, 2: 4, 3: 9}
+True
+('a', 'b', 'c')
+TypeError: 'int' object is not iterable
+1.0
+ZeroDivisionError: division by zero
+[]
+[]
+True True
+map made
+  number 1
+  square 1
+1
+  number 2
+  square 2
+4
+filter made
+  number 1
+  odd? 1
+1
+  number 2
+  odd? 2
+  number 3
+  odd? 3
+3
+zip made
+  number 1
+  number 2
+  number 3
+[(1, 'a'), (2, 'b')]
+enumerate made
+  number 1
+  number 2
+(10, 1) (11, 2)
+[100, 102, 104]
+[1, 2, 3]
+[(0, 5), (1, 6), (2, 7)]
+[(0, 1, 2), (1, 2, 3)]
+7
+[2, 3, 4] [2, 3]
+[] [(1, 'a', 0), (2, 'b', 1)]
+[(0, 'a'), (1, 'b')] [(1, 'a'), (2, 'b')]
+['map', 'filter', 'zip', 'enumerate']
+True ['1', '2'] []
+  read ' a '
+1: a
+  read ''
+  skipped an empty line
+  read 'b\n'
+2: b
+  read '   '
+  skipped an empty line
+  read 'c'
+3: c
+[3, 9, 15, 21]
+  looked at 0
+  looked at 1
+  looked at 2
+True
+  looked at 0
+  looked at 1
+  looked at 2
+False
+False True
+True False
+  looked at 1
+  looked at 2
+  looked at 3
+True
+  looked at 1
+  looked at 2
+False
+True
+  looked at 1
+  looked at 2
+  looked at 3
+  looked at 4
+True [3, 4]
+0 2 4
+0 [1, 2, 3, 4]
+ValueError: too many values to unpack (expected 2)
+ValueError: not enough values to unpack (expected 3, got 2)
+('x', 'y', 'z')
+['0', '1', '2', ('a', 'b')]
+[3, 2, 1] [4, 3, 2, 1, 0] ['c', 'b', 'a'] [9, 6, 3, 0]
+1 5 6 14.0
+[1, 3] 2
+{'a': 0, 'b': 1, 'c': 2} {0: 'x', 1: 'y'}
+[0, 1, 2, 3, 4] [0, 1, 2, 3, 4] {1} {'a': 0, 'b': 1}
+1 2 3 none left
+1
+[2, 3]
+[]
+0 1
+h i None
+a ['b']
+True [1, 2]
+[2, 1] [0, 1, 2]
+[5, 6] [7]
+TypeError: 'int' object is not iterable
+TypeError: 'list' object is not an iterator
+TypeError: 'int' object is not iterable
+True t
+0 1 2
+empty range
+[2, 4, 6] [(2, 0), (4, 1)] 2
+[3, 5, 7] [(0, 2), (1, 4)] True
+[4, 8]
+2 1 [3, 2, 1] 10 [4, 2]
+ValueError: too many values to unpack (expected 2)
+['x', 'y', 'z'] ['x', 'y', 'z'] [(0, 'x'), (1, 'y'), (2, 'z')] ['x', 'y', 'z', 'x', 'y', 'z', 'x']
+['xy', 'xz', 'yx', 'yz', 'zx', 'zy']
+[0, 1, 2] [0, 1] ['Bag'] True False
+x y z ['z', 'y', 'x'] z {0: 'x', 1: 'y', 2: 'z'} x-y-z
+['derived', 'base']
+[0, 10, 20] 0 [0, 10, 20] True
+TypeError: iter() returned non-iterator of type 'list'
+1 11 12 22 23
+[2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47]
+[0, 100, 200] [1, 101, 201]
+[0, 2, 4, 49, [0, 2, 4]]
+[100, 101, 103] 103
+[1, 2, (), []] [1, 3, (4, 5), [('k', 6)]]
+TypeError: default_args() missing 1 required positional argument: 'a'
+['A', 'B', 'C']
+5050
+[0, 1125899906842624]

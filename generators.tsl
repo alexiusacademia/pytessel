@@ -1,0 +1,913 @@
+// Generators: functions with `yield`, which run a piece at a time.
+//
+// The interpreter runs a statement by calling itself for the statements
+// inside it (interp.tsl), and a call can't be left in the middle and gone
+// back into later. So a generator's body is run another way: the
+// generator keeps a stack of frames, one for each block it's inside of (the
+// body of the function, of a loop, of a `try`, …), each with how far it is.
+// `genLoop` runs the next statement of the frame on top. A statement with no
+// `yield` in it is run whole by the interpreter, as anywhere else; one
+// with a `yield` somewhere inside (the parser marks them) is opened up
+// into a frame of its own, or, if it's the `yield` itself, the generator
+// stops there and gives the value. The next `next` or `send` goes on from
+// the frames as they were left.
+//
+// `yield` is understood as a statement of its own or as the whole right
+// side of an assignment or a `return`: `yield v`, `x = yield v`,
+// `x += yield v`, `return (yield v)`, and the same with `yield from`.
+// Anywhere else (`f((yield v))`, `if (yield v):`) it's a SyntaxError.
+
+// What was running when a generator's (or generator expression's) body
+// was gone into, to go back to.
+struct Caller {
+    env: Int
+    name: String
+    cls: Int
+    receiver: Value
+    line: Int
+}
+
+fn enterBody(_ it: bind Interp, _ env: Int, _ name: String, _ owner: Int, _ receiver: Value) -> Caller {
+    let caller = Caller(env: it.env, name: it.funcName, cls: it.curClass, receiver: it.curSelf, line: it.line)
+    it.env = env
+    it.funcName = name
+    it.curClass = owner
+    it.curSelf = receiver
+    it.depth += 1
+    caller
+}
+
+fn leaveBody(_ it: bind Interp, _ caller: Caller) {
+    it.depth -= 1
+    it.env = caller.env
+    it.funcName = caller.name
+    it.curClass = caller.cls
+    it.curSelf = caller.receiver
+    if it.signal == .raising {
+        it.traceLines.append(caller.line)
+        it.traceNames.append(caller.name)
+    }
+    it.line = caller.line
+}
+
+// A call of a function with `yield`: nothing of it runs yet. `env` has
+// its arguments.
+fn makeGenerator(_ it: bind Interp, _ closure: Int, _ env: Int, _ receiver: Value) -> Value {
+    let c = it.closures[closure]
+    let def = it.prog.defs[c.fnId]
+    it.generators.append(Generator(fnId: c.fnId, env: env, name: def.name, owner: c.owner, receiver: receiver,
+                                   frames: [GenFrame(body: def.body)]))
+    it.freshGenerator = it.generators.count - 1
+    it.freshDepth = it.depth
+    makeIter(it, PyIter(kind: "generator", mode: IterMode.generator, ref: it.generators.count - 1))
+}
+
+// Runs a generator up to its next `yield`, and gives what it yields.
+// `sent` is the value of the `yield` it was waiting at; with `throwing`,
+// `sent` is an exception raised there instead. Gives `.absent` when the
+// generator ended: by returning (`it.stopValue` is what it returned), or
+// with an exception (`it.signal`).
+fn genResume(_ it: bind Interp, _ gid: Int, _ sent: Value, _ throwing: Bool) -> Value {
+    if it.generators[gid].done {
+        it.stopValue = .none
+        if throwing {
+            it.raise(sent)
+        }
+        return Value.absent
+    }
+    if it.generators[gid].running {
+        it.throw("ValueError", "generator already executing")
+        return Value.absent
+    }
+    if it.depth >= 600 {
+        it.throw("RecursionError", "maximum recursion depth exceeded")
+        return Value.absent
+    }
+    let env = it.generators[gid].env
+    let caller = enterBody(it, env, it.generators[gid].name, it.generators[gid].owner, it.generators[gid].receiver)
+    // The exceptions its `except` blocks were handling are back.
+    let base = it.handling.count
+    if !it.generators[gid].handling.isEmpty {
+        it.handling.appendAll(it.generators[gid].handling)
+        it.generators[gid].handling = []
+    }
+    it.generators[gid].running = true
+    var out = Value.absent
+    if !it.generators[gid].started {
+        it.generators[gid].started = true
+        if throwing {
+            it.line = it.prog.defs[it.generators[gid].fnId].line
+            it.raise(sent)
+        }
+    } else {
+        let n = it.generators[gid].resumeNode
+        it.line = it.prog.lines[n]
+        if !isAbsent(it.generators[gid].delegate) {
+            out = genDelegate(it, gid, n, sent, throwing)
+        } else if throwing {
+            it.raise(sent)
+        } else {
+            genComplete(it, gid, n, sent)
+        }
+    }
+    if isAbsent(out) {
+        out = genLoop(it, gid)
+    }
+    it.generators[gid].running = false
+    if it.handling.count > base {
+        if !isAbsent(out) {
+            it.generators[gid].handling = it.handling.slice(from: base, to: it.handling.count)
+        }
+        it.handling = it.handling.slice(from: 0, to: base)
+    }
+    if !isAbsent(out) {
+        leaveBody(it, caller)
+        return out
+    }
+    // It ended.
+    it.generators[gid].done = true
+    it.generators[gid].frames = []
+    it.generators[gid].delegate = Value.absent
+    it.stopValue = .none
+    if it.signal == .returning {
+        it.stopValue = it.retval
+        it.retval = .none
+        it.signal = .none
+    } else if it.signal == .raising {
+        // (A StopIteration from inside would look like the generator ending.)
+        if exceptionMatches(it, it.exc, .klass(id: it.classIds["StopIteration"] ?? -1)) {
+            it.signal = .none
+            it.throw("RuntimeError", "generator raised StopIteration")
+        }
+    } else {
+        it.signal = .none
+    }
+    leaveBody(it, caller)
+    it.releaseEnv(env)
+    Value.absent
+}
+
+// The statements of the frame on top, one after the other, until a
+// `yield` (its value is given) or until no frame is left (`.absent`).
+fn genLoop(_ it: bind Interp, _ gid: Int) -> Value {
+    while true {
+        let top = it.generators[gid].frames.count - 1
+        if top < 0 {
+            break
+        }
+        if it.signal != .none {
+            genUnwind(it, gid, top)
+            continue
+        }
+        let pc = it.generators[gid].frames[top].pc
+        if pc < it.generators[gid].frames[top].body.count {
+            let n = it.generators[gid].frames[top].body[pc]
+            it.generators[gid].frames[top].pc = pc + 1
+            if it.prog.yielding[n] {
+                let out = genStep(it, gid, n)
+                if !isAbsent(out) {
+                    return out
+                }
+            } else {
+                it.exec(n)
+            }
+        } else {
+            genBlockEnd(it, gid, top)
+        }
+    }
+    Value.absent
+}
+
+fn genPush(_ it: bind Interp, _ gid: Int, _ frame: GenFrame) {
+    it.generators[gid].frames.append(frame)
+}
+
+fn genPop(_ it: bind Interp, _ gid: Int) {
+    it.generators[gid].frames.removeLast()
+}
+
+// A statement with a `yield` somewhere in it. Gives what it yields, if
+// the generator stops at it now, or `.absent`.
+fn genStep(_ it: bind Interp, _ gid: Int, _ n: Int) -> Value {
+    it.line = it.prog.lines[n]
+    if !it.spend() {
+        return Value.absent
+    }
+    match it.prog.nodes[n] {
+        .exprStmt(value) -> { return genYield(it, gid, n, value) }
+        .assign(_, value) -> { return genYield(it, gid, n, value) }
+        .returnStmt(value) -> {
+            if value >= 0 {
+                return genYield(it, gid, n, value)
+            }
+            it.exec(n)
+        }
+        .augAssign(_, target, value) -> {
+            var isYield = false
+            match it.prog.nodes[value] {
+                .yieldExpr(_) -> { isYield = true }
+                .yieldFrom(_) -> { isYield = true }
+                _ -> {}
+            }
+            if !isYield {
+                it.exec(n)
+                return Value.absent
+            }
+            // The target is read first, then the generator waits.
+            var held: [Value] = []
+            match it.prog.nodes[target] {
+                .name(id) -> { held = [it.lookup(id)] }
+                .attr(object, name) -> {
+                    let o = it.eval(object)
+                    if it.signal != .none {
+                        return Value.absent
+                    }
+                    held = [o, getAttr(it, o, name)]
+                }
+                .subscript(object, index) -> {
+                    let o = it.eval(object)
+                    if it.signal != .none {
+                        return Value.absent
+                    }
+                    let i = it.eval(index)
+                    if it.signal != .none {
+                        return Value.absent
+                    }
+                    held = [o, i, getItem(it, o, i)]
+                }
+                _ -> {
+                    it.throw("SyntaxError", "illegal expression for augmented assignment")
+                }
+            }
+            if it.signal != .none {
+                return Value.absent
+            }
+            it.generators[gid].held = held
+            return genYield(it, gid, n, value)
+        }
+        .ifStmt(test, body, orelse) -> {
+            let t = it.eval(test)
+            if it.signal != .none {
+                return Value.absent
+            }
+            let yes = truthy(it, t)
+            if it.signal != .none {
+                return Value.absent
+            }
+            genPush(it, gid, GenFrame(body: if yes { body } else { orelse }))
+        }
+        .whileStmt(_, body, _) -> {
+            // (Its place is past the body's end: the test comes first.)
+            genPush(it, gid, GenFrame(kind: FrameKind.whileLoop, node: n, body: body, pc: body.count))
+        }
+        .forStmt(_, iter, body, _) -> {
+            let iterable = it.eval(iter)
+            if it.signal != .none {
+                return Value.absent
+            }
+            let closes = loopGenerator(it, iter, iterable)
+            let source = getIter(it, iterable)
+            if it.signal != .none {
+                return Value.absent
+            }
+            genPush(it, gid, GenFrame(kind: FrameKind.forLoop, node: n, body: body, pc: body.count, held: source, closes: closes))
+        }
+        .tryStmt(body, _, _, _) -> {
+            genPush(it, gid, GenFrame(kind: FrameKind.tryBlock, node: n, body: body))
+        }
+        .withStmt(items, targets, body) -> {
+            genEnterWith(it, gid, items, targets, body, 0)
+        }
+        _ -> {
+            // (A `yield` where it can't be: evaluating it says so.)
+            it.exec(n)
+        }
+    }
+    Value.absent
+}
+
+// with a as x, b as y: body, from item `at` on: a frame for each item,
+// so that each is left in its turn.
+fn genEnterWith(_ it: bind Interp, _ gid: Int, _ items: [Int], _ targets: [Int], _ body: [Int], _ at: Int) {
+    let manager = it.eval(items[at])
+    if it.signal != .none {
+        return
+    }
+    it.line = it.prog.lines[items[at]]
+    let entered = enterContext(it, manager)
+    if it.signal != .none {
+        return
+    }
+    let last = at == items.count - 1
+    genPush(it, gid, GenFrame(kind: FrameKind.withBlock, body: if last { body } else { [] }, held: manager))
+    if targets[at] >= 0 {
+        it.assignTo(targets[at], entered)
+    }
+    if it.signal == .none && !last {
+        genEnterWith(it, gid, items, targets, body, at + 1)
+    }
+}
+
+// The statement `n` is `yield …`, or has one as its right side (`value`):
+// the generator stops here, with the statement to finish when it goes on.
+fn genYield(_ it: bind Interp, _ gid: Int, _ n: Int, _ value: Int) -> Value {
+    match it.prog.nodes[value] {
+        .yieldExpr(inner) -> {
+            var out = Value.none
+            if inner >= 0 {
+                out = it.eval(inner)
+                if it.signal != .none {
+                    return Value.absent
+                }
+            }
+            it.generators[gid].resumeNode = n
+            return out
+        }
+        .yieldFrom(inner) -> {
+            let iterable = it.eval(inner)
+            if it.signal != .none {
+                return Value.absent
+            }
+            it.line = it.prog.lines[n]
+            let source = getIter(it, iterable)
+            if it.signal != .none {
+                return Value.absent
+            }
+            it.generators[gid].resumeNode = n
+            it.generators[gid].delegate = source
+            return genDelegate(it, gid, n, Value.none, false)
+        }
+        _ -> {
+            it.exec(n)
+        }
+    }
+    Value.absent
+}
+
+// The statement a generator was waiting at, finished: `v` is the value
+// of its `yield`.
+fn genComplete(_ it: bind Interp, _ gid: Int, _ n: Int, _ v: Value) {
+    match it.prog.nodes[n] {
+        .assign(targets, _) -> {
+            for t in targets {
+                it.assignTo(t, v)
+                if it.signal != .none {
+                    return
+                }
+            }
+        }
+        .returnStmt(_) -> {
+            it.retval = v
+            it.signal = .returning
+        }
+        .augAssign(op, target, _) -> {
+            let held = it.generators[gid].held
+            it.generators[gid].held = []
+            if held.isEmpty {
+                return
+            }
+            let result = inPlaceOp(it, op, held[held.count - 1], v)
+            if it.signal != .none {
+                return
+            }
+            match it.prog.nodes[target] {
+                .name(id) -> it.setVar(id, result)
+                .attr(_, name) -> setAttr(it, held[0], name, result)
+                .subscript(_, _) -> setItem(it, held[0], held[1], result)
+                _ -> {}
+            }
+        }
+        _ -> {}
+    }
+}
+
+// `yield from`: the next value of the iterator being passed on, which is
+// sent `sent` (or has it raised in it). `.absent` when that iterator
+// ended: then the statement is finished with what it returned, or an
+// exception is on its way.
+fn genDelegate(_ it: bind Interp, _ gid: Int, _ n: Int, _ sent: Value, _ throwing: Bool) -> Value {
+    let source = it.generators[gid].delegate
+    var inner = -1
+    match source {
+        .iterator(id) -> {
+            if it.iterators[id].mode == IterMode.generator {
+                inner = it.iterators[id].ref
+            }
+        }
+        _ -> {}
+    }
+    it.stopValue = .none
+    var v = Value.absent
+    if throwing {
+        if exceptionMatches(it, sent, .klass(id: it.classIds["GeneratorExit"] ?? -1)) {
+            // Closing: the inner one is closed, then this one.
+            it.generators[gid].delegate = Value.absent
+            closeIterator(it, source)
+            if it.signal == .none {
+                it.raise(sent)
+            }
+            return Value.absent
+        }
+        var thrower = Value.absent
+        match source {
+            .instance(id) -> { thrower = classAttr(it, it.instances[id].cls, "throw") }
+            _ -> {}
+        }
+        if inner >= 0 {
+            v = genResume(it, inner, sent, true)
+        } else if thrower != Value.absent {
+            v = it.callValue(thrower, [source, sent], [], [])
+            if stopCaught(it) {
+                v = Value.absent
+            }
+        } else {
+            match source {
+                .iterator(id) -> {
+                    if it.iterators[id].mode == IterMode.genexpr {
+                        it.iterators[id].done = true
+                    }
+                }
+                _ -> {}
+            }
+            it.raise(sent)
+        }
+    } else if sent == Value.none {
+        v = nextValue(it, source)
+    } else if inner >= 0 {
+        v = genResume(it, inner, sent, false)
+    } else {
+        v = callMethod(it, source, "send", [sent], [], [])
+        if stopCaught(it) {
+            v = Value.absent
+        }
+    }
+    if it.signal != .none {
+        it.generators[gid].delegate = Value.absent
+        return Value.absent
+    }
+    if isAbsent(v) {
+        it.generators[gid].delegate = Value.absent
+        genComplete(it, gid, n, it.stopValue)
+    }
+    v
+}
+
+// The frame on top has run its last statement.
+fn genBlockEnd(_ it: bind Interp, _ gid: Int, _ top: Int) {
+    let phase = it.generators[gid].frames[top].phase
+    let n = it.generators[gid].frames[top].node
+    match it.generators[gid].frames[top].kind {
+        .block -> genPop(it, gid)
+        .whileLoop -> {
+            if phase == 1 {
+                genPop(it, gid)
+                return
+            }
+            match it.prog.nodes[n] {
+                .whileStmt(test, _, orelse) -> {
+                    it.line = it.prog.lines[n]
+                    let t = it.eval(test)
+                    if it.signal != .none {
+                        return
+                    }
+                    let yes = truthy(it, t)
+                    if it.signal != .none {
+                        return
+                    }
+                    if yes {
+                        it.generators[gid].frames[top].pc = 0
+                    } else {
+                        genLoopElse(it, gid, top, orelse)
+                    }
+                }
+                _ -> genPop(it, gid)
+            }
+        }
+        .forLoop -> {
+            if phase == 1 {
+                genPop(it, gid)
+                return
+            }
+            match it.prog.nodes[n] {
+                .forStmt(target, _, _, orelse) -> {
+                    it.line = it.prog.lines[n]
+                    let v = nextValue(it, it.generators[gid].frames[top].held)
+                    if it.signal != .none {
+                        return
+                    }
+                    if isAbsent(v) {
+                        genLoopElse(it, gid, top, orelse)
+                        return
+                    }
+                    it.assignTo(target, v)
+                    if it.signal == .none {
+                        it.generators[gid].frames[top].pc = 0
+                    }
+                }
+                _ -> genPop(it, gid)
+            }
+        }
+        .tryBlock -> {
+            if phase == 3 {
+                // After `finally`, what was on its way out goes on.
+                let frame = it.generators[gid].frames[top]
+                genPop(it, gid)
+                if frame.pending != .none {
+                    it.signal = frame.pending
+                    it.retval = frame.pendingValue
+                    it.exc = frame.pendingExc
+                    it.traceLines = frame.lines
+                    it.traceNames = frame.names
+                }
+                return
+            }
+            if phase == 1 {
+                it.handling.removeLast()
+            }
+            if phase == 0 {
+                match it.prog.nodes[n] {
+                    .tryStmt(_, _, orelse, _) -> {
+                        if !orelse.isEmpty {
+                            it.generators[gid].frames[top].phase = 2
+                            it.generators[gid].frames[top].body = orelse
+                            it.generators[gid].frames[top].pc = 0
+                            return
+                        }
+                    }
+                    _ -> {}
+                }
+            }
+            genFinally(it, gid, top)
+        }
+        .withBlock -> {
+            let manager = it.generators[gid].frames[top].held
+            genPop(it, gid)
+            exitContext(it, manager, Value.none)
+        }
+    }
+}
+
+// A loop has no more turns: its `else` block, if it has one.
+fn genLoopElse(_ it: bind Interp, _ gid: Int, _ top: Int, _ orelse: [Int]) {
+    if orelse.isEmpty {
+        genPop(it, gid)
+        return
+    }
+    it.generators[gid].frames[top].phase = 1
+    it.generators[gid].frames[top].body = orelse
+    it.generators[gid].frames[top].pc = 0
+}
+
+// A `try` is being left (normally, or with `it.signal` on its way out):
+// its `finally` block runs first, and what was on its way out waits in
+// the frame.
+fn genFinally(_ it: bind Interp, _ gid: Int, _ top: Int) {
+    var finalbody: [Int] = []
+    match it.prog.nodes[it.generators[gid].frames[top].node] {
+        .tryStmt(_, _, _, last) -> { finalbody = last }
+        _ -> {}
+    }
+    if finalbody.isEmpty {
+        genPop(it, gid)
+        return
+    }
+    it.generators[gid].frames[top].pending = it.signal
+    it.generators[gid].frames[top].pendingValue = it.retval
+    it.generators[gid].frames[top].pendingExc = it.exc
+    it.generators[gid].frames[top].lines = it.traceLines
+    it.generators[gid].frames[top].names = it.traceNames
+    it.signal = .none
+    it.generators[gid].frames[top].phase = 3
+    it.generators[gid].frames[top].body = finalbody
+    it.generators[gid].frames[top].pc = 0
+}
+
+// An exception reached a `try` block: the first `except` that fits takes
+// it (true), and the frame goes on with that block.
+fn genHandle(_ it: bind Interp, _ gid: Int, _ top: Int) -> Bool {
+    let raised = it.exc
+    var handlers: [Int] = []
+    match it.prog.nodes[it.generators[gid].frames[top].node] {
+        .tryStmt(_, hs, _, _) -> { handlers = hs }
+        _ -> {}
+    }
+    for h in handlers {
+        match it.prog.nodes[h] {
+            .handler(type, name, body) -> {
+                var fits = true
+                if type >= 0 {
+                    // (The exception is put aside while its type is worked out.)
+                    let lines = it.traceLines
+                    let names = it.traceNames
+                    it.signal = .none
+                    let wanted = it.eval(type)
+                    if it.signal == .none {
+                        fits = exceptionMatches(it, raised, wanted)
+                    }
+                    if it.signal != .none {
+                        // (Working it out failed: that's the exception now.)
+                        return false
+                    }
+                    it.signal = .raising
+                    it.exc = raised
+                    it.traceLines = lines
+                    it.traceNames = names
+                }
+                if fits {
+                    it.signal = .none
+                    it.exc = .none
+                    if name != "" {
+                        it.setVar(name, raised)
+                    }
+                    it.handling.append(raised)
+                    it.generators[gid].frames[top].phase = 1
+                    it.generators[gid].frames[top].body = body
+                    it.generators[gid].frames[top].pc = 0
+                    return true
+                }
+            }
+            _ -> {}
+        }
+    }
+    false
+}
+
+// `break`, `continue`, `return` or an exception is on its way out
+// (`it.signal`) of the frame on top: the frame deals with it, or is left.
+fn genUnwind(_ it: bind Interp, _ gid: Int, _ top: Int) {
+    let phase = it.generators[gid].frames[top].phase
+    match it.generators[gid].frames[top].kind {
+        .block -> genPop(it, gid)
+        .whileLoop -> genLeaveLoop(it, gid, top, phase)
+        .forLoop -> genLeaveLoop(it, gid, top, phase)
+        .tryBlock -> {
+            if phase == 3 {
+                // (Out of `finally` itself: what was waiting is forgotten.)
+                genPop(it, gid)
+                return
+            }
+            if phase == 0 && it.signal == .raising {
+                if genHandle(it, gid, top) {
+                    return
+                }
+            }
+            if phase == 1 {
+                it.handling.removeLast()
+            }
+            genFinally(it, gid, top)
+        }
+        .withBlock -> {
+            let manager = it.generators[gid].frames[top].held
+            genPop(it, gid)
+            let pending = it.signal
+            let pendingValue = it.retval
+            let pendingExc = it.exc
+            let lines = it.traceLines
+            let names = it.traceNames
+            it.signal = .none
+            let swallow = exitContext(it, manager, if pending == .raising { pendingExc } else { Value.none })
+            if it.signal != .none {
+                return
+            }
+            if pending == .raising && swallow {
+                return
+            }
+            it.signal = pending
+            it.retval = pendingValue
+            it.exc = pendingExc
+            it.traceLines = lines
+            it.traceNames = names
+        }
+    }
+}
+
+fn genLeaveLoop(_ it: bind Interp, _ gid: Int, _ top: Int, _ phase: Int) {
+    if phase == 0 {
+        if it.signal == .continueLoop {
+            // On to the test, or the next value.
+            it.signal = .none
+            it.generators[gid].frames[top].pc = it.generators[gid].frames[top].body.count
+            return
+        }
+        let closes = it.generators[gid].frames[top].closes
+        if it.signal == .breakLoop {
+            it.signal = .none
+            genPop(it, gid)
+            if closes >= 0 {
+                genAbandon(it, closes)
+            }
+            return
+        }
+        if closes >= 0 {
+            var leaving = it.signal == .returning
+            if it.signal == .raising {
+                leaving = exceptionMatches(it, it.exc, .klass(id: it.classIds["GeneratorExit"] ?? -1))
+            }
+            if leaving {
+                genPop(it, gid)
+                genAbandon(it, closes)
+                return
+            }
+        }
+    }
+    genPop(it, gid)
+}
+
+// The generator a `for` loop is the only one to have: its iterable (the
+// node `iter`, with the value `iterable`) is a call of a generator
+// function, made here. -1 if it isn't.
+fn loopGenerator(_ it: bind Interp, _ iter: Int, _ iterable: Value) -> Int {
+    match iterable {
+        .iterator(id) -> {
+            if it.iterators[id].mode != IterMode.generator {
+                return -1
+            }
+            let gid = it.iterators[id].ref
+            if gid != it.freshGenerator || it.freshDepth != it.depth {
+                return -1
+            }
+            match it.prog.nodes[iter] {
+                .call(_, _, _) -> { return gid }
+                _ -> {}
+            }
+        }
+        _ -> {}
+    }
+    -1
+}
+
+// A `for` loop was left (by `break` or `return`) before its generator
+// ended, and nothing else has the generator: it's closed now, so that its
+// `finally` blocks run, as when Python frees it. What was on its way out of
+// the loop goes on.
+fn genAbandon(_ it: bind Interp, _ gid: Int) {
+    let pending = it.signal
+    let pendingValue = it.retval
+    let pendingExc = it.exc
+    let lines = it.traceLines
+    let names = it.traceNames
+    it.signal = .none
+    genClose(it, gid)
+    // (What goes wrong in it then is nobody's to catch.)
+    it.signal = pending
+    it.retval = pendingValue
+    it.exc = pendingExc
+    it.traceLines = lines
+    it.traceNames = names
+}
+
+// ---- send, throw, close ----
+
+// Closes what `yield from` was passing on, if it can be closed.
+fn closeIterator(_ it: bind Interp, _ iterator: Value) {
+    match iterator {
+        .iterator(id) -> {
+            if it.iterators[id].mode == IterMode.generator {
+                genClose(it, it.iterators[id].ref)
+            } else if it.iterators[id].mode == IterMode.genexpr {
+                it.iterators[id].done = true
+            }
+        }
+        .instance(id) -> {
+            let closer = classAttr(it, it.instances[id].cls, "close")
+            if closer != Value.absent {
+                it.callValue(closer, [iterator], [], [])
+            }
+        }
+        _ -> {}
+    }
+}
+
+// g.close(): GeneratorExit is raised at the `yield` the generator waits
+// at, so that its `finally` blocks run.
+fn genClose(_ it: bind Interp, _ gid: Int) {
+    if it.generators[gid].done {
+        return
+    }
+    if it.generators[gid].running {
+        it.throw("ValueError", "generator already executing")
+        return
+    }
+    if !it.generators[gid].started {
+        it.generators[gid].done = true
+        it.generators[gid].frames = []
+        it.releaseEnv(it.generators[gid].env)
+        return
+    }
+    let leaving = instantiate(it, it.classIds["GeneratorExit"] ?? 0, [], [], [])
+    let v = genResume(it, gid, leaving, true)
+    if it.signal == .raising {
+        if exceptionMatches(it, it.exc, .klass(id: it.classIds["GeneratorExit"] ?? -1)) {
+            it.signal = .none
+            it.exc = .none
+        }
+        return
+    }
+    if !isAbsent(v) {
+        it.throw("RuntimeError", "generator ignored GeneratorExit")
+    }
+}
+
+// The exception `g.throw(…)` is given: an exception, or a class of them
+// (with, the old way, its argument after it).
+fn thrownException(_ it: bind Interp, _ args: [Value]) -> Value {
+    if args.isEmpty {
+        return it.throw("TypeError", "throw expected at least 1 argument, got 0")
+    }
+    var raised = args[0]
+    match raised {
+        .klass(id) -> {
+            var given: [Value] = []
+            if args.count > 1 && args[1] != Value.none {
+                given = [args[1]]
+            }
+            raised = instantiate(it, id, given, [], [])
+            if it.signal != .none {
+                return Value.none
+            }
+        }
+        _ -> {}
+    }
+    if !isException(it, raised) {
+        return it.throw("TypeError", "exceptions must be classes or instances deriving from BaseException, not {typeName(it, raised)}")
+    }
+    raised
+}
+
+// StopIteration, with what a generator returned.
+fn raiseStop(_ it: bind Interp, _ value: Value) -> Value {
+    let stop = instantiate(it, it.classIds["StopIteration"] ?? 0, if value == Value.none { [] } else { [value] }, [], [])
+    if it.signal == .none {
+        it.raise(stop)
+    }
+    Value.none
+}
+
+// The methods of a generator (`id` is its iterator) besides __next__ and
+// __iter__. Nil if `name` isn't one.
+fn generatorMethod(_ it: bind Interp, _ id: Int, _ name: String, _ args: [Value]) -> Value? {
+    let mode = it.iterators[id].mode
+    if mode != IterMode.generator && mode != IterMode.genexpr {
+        return nil
+    }
+    if name != "send" && name != "throw" && name != "close" {
+        return nil
+    }
+    if name == "close" {
+        if mode == IterMode.genexpr {
+            if it.iterators[id].running {
+                return it.throw("ValueError", "generator already executing")
+            }
+            it.iterators[id].done = true
+            it.iterators[id].sources = []
+        } else {
+            genClose(it, it.iterators[id].ref)
+        }
+        return Value.none
+    }
+    var v = Value.absent
+    it.stopValue = .none
+    if name == "send" {
+        if args.count != 1 {
+            return it.throw("TypeError", "send() takes exactly one argument ({args.count} given)")
+        }
+        if mode == IterMode.genexpr {
+            // (It has no `yield` to give the value to.)
+            v = nextValue(it, .iterator(id: id))
+        } else {
+            let gid = it.iterators[id].ref
+            if args[0] != Value.none && !it.generators[gid].started && !it.generators[gid].done {
+                return it.throw("TypeError", "can't send non-None value to a just-started generator")
+            }
+            if !it.spend() {
+                return Value.none
+            }
+            v = genResume(it, gid, args[0], false)
+        }
+    } else {
+        let raised = thrownException(it, args)
+        if it.signal != .none {
+            return Value.none
+        }
+        if mode == IterMode.genexpr {
+            if it.iterators[id].running {
+                return it.throw("ValueError", "generator already executing")
+            }
+            it.iterators[id].done = true
+            it.iterators[id].sources = []
+            it.raise(raised)
+            return Value.none
+        }
+        if !it.spend() {
+            return Value.none
+        }
+        v = genResume(it, it.iterators[id].ref, raised, true)
+    }
+    if it.signal != .none {
+        return Value.none
+    }
+    if isAbsent(v) {
+        return raiseStop(it, it.stopValue)
+    }
+    v
+}

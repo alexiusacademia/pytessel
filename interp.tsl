@@ -16,6 +16,7 @@ struct Interp {
     classes: [Klass] = []
     instances: [Instance] = []
     iterators: [PyIter] = []
+    generators: [Generator] = []
     files: [PyFile] = []
     cells: [Value] = []
     // The functions that set properties (`@x.setter`), by the property's cell.
@@ -38,8 +39,14 @@ struct Interp {
     curClass: Int = -1
     curSelf: Value
 
-    // For each generator function running, the list of what it yields.
-    yields: [Int] = []
+    // What the generator that just ended returned (`StopIteration.value`).
+    stopValue: Value = Value.none
+    // The generator the last call made, if the call was of a generator
+    // function itself (-1 if not), and how deep the call was made. A `for`
+    // loop over such a call is the only one to have the generator, so it
+    // closes it when it's left early (see `loopGenerator`).
+    freshGenerator: Int = -1
+    freshDepth: Int = 0
     // The exceptions being handled by `except` blocks (for a bare `raise`).
     handling: [Value] = []
     // Where the exception that's raised came through: lines and functions.
@@ -413,6 +420,20 @@ struct Interp {
                 if yes { eval(then) } else { eval(otherwise) }
             }
             .comp(kind, element, value, targets, iters, conds) -> {
+                if kind == 3 {
+                    // A generator expression: only its first `for`'s
+                    // iterator is worked out now, the rest as it's asked.
+                    let first = eval(iters[0])
+                    if signal != .none {
+                        return .none
+                    }
+                    line = prog.lines[n]
+                    let source = getIter(self, first)
+                    if signal != .none {
+                        return .none
+                    }
+                    return makeGenexpr(self, n, source)
+                }
                 // A comprehension's variables are its own.
                 let outer = env
                 let inner = newEnv(outer)
@@ -441,7 +462,7 @@ struct Interp {
                     }
                     Value.dict(id: id)
                 } else {
-                    newIterator(out, "generator")
+                    Value.none
                 }
             }
             .joined(parts) -> {
@@ -481,18 +502,15 @@ struct Interp {
                 }
                 Value.str(s: formatValue(self, v, toStr(self, specValue)))
             }
-            .yieldExpr(value) -> {
-                var v = Value.none
-                if value >= 0 {
-                    v = eval(value)
-                    if signal != .none {
-                        return .none
-                    }
-                }
-                if let sink = yields.last {
-                    lists[sink].append(v)
-                }
-                Value.none
+            .yieldExpr(_) -> {
+                // (A generator stops at a `yield` that's a statement or an
+                // assignment's right side before it gets here: generators.tsl.)
+                line = prog.lines[n]
+                throw("SyntaxError", "'yield' inside a larger expression is not supported: write 'yield v' or 'x = yield v' on a line of its own")
+            }
+            .yieldFrom(_) -> {
+                line = prog.lines[n]
+                throw("SyntaxError", "'yield from' inside a larger expression is not supported: write 'yield from v' or 'x = yield from v' on a line of its own")
             }
             .walrus(target, value) -> {
                 let v = eval(value)
@@ -571,58 +589,99 @@ struct Interp {
     // `outValues`, for a dictionary).
     fn comprehend(_ kind: Int, _ element: Int, _ value: Int, _ targets: [Int], _ iters: [Int], _ conds: [[Int]],
                   _ at: Int, _ out: bind [Value], _ outValues: bind [Value]) {
-        if at == targets.count {
-            if !spend() {
-                return
-            }
-            let v = eval(element)
-            if signal != .none {
-                return
-            }
-            out.append(v)
-            if kind == 2 {
-                let second = eval(value)
-                if signal != .none {
-                    return
-                }
-                outValues.append(second)
-            }
-            return
-        }
         let iterable = eval(iters[at])
         if signal != .none {
             return
         }
-        let items = iterate(self, iterable)
+        match iterable {
+            .range(start, stop, step) -> {
+                var i = start
+                while (step > 0 && i < stop) || (step < 0 && i > stop) {
+                    if !comprehendItem(kind, element, value, targets, iters, conds, at, .int(i: i), out, outValues) {
+                        return
+                    }
+                    i += step
+                }
+            }
+            .list(id) -> {
+                // (The list as it is each time round.)
+                var i = 0
+                while i < lists[id].count {
+                    if !comprehendItem(kind, element, value, targets, iters, conds, at, lists[id][i], out, outValues) {
+                        return
+                    }
+                    i += 1
+                }
+            }
+            .tuple(id) -> {
+                let items = lists[id]
+                for item in items {
+                    if !comprehendItem(kind, element, value, targets, iters, conds, at, item, out, outValues) {
+                        return
+                    }
+                }
+            }
+            _ -> {
+                // Anything else gives its values one at a time.
+                let source = getIter(self, iterable)
+                if signal != .none {
+                    return
+                }
+                while true {
+                    let item = nextValue(self, source)
+                    if signal != .none || isAbsent(item) {
+                        return
+                    }
+                    if !comprehendItem(kind, element, value, targets, iters, conds, at, item, out, outValues) {
+                        return
+                    }
+                }
+            }
+        }
+    }
+
+    // One value of the `for` clause `at`: if its conditions hold, the
+    // clauses after it run. False when something was raised.
+    fn comprehendItem(_ kind: Int, _ element: Int, _ value: Int, _ targets: [Int], _ iters: [Int], _ conds: [[Int]],
+                      _ at: Int, _ item: Value, _ out: bind [Value], _ outValues: bind [Value]) -> Bool {
+        assignTo(targets[at], item)
         if signal != .none {
-            return
+            return false
         }
-        for item in items {
-            assignTo(targets[at], item)
+        for c in conds[at] {
+            let t = eval(c)
             if signal != .none {
-                return
+                return false
             }
-            var keep = true
-            for c in conds[at] {
-                let t = eval(c)
-                if signal != .none {
-                    return
-                }
-                keep = truthy(self, t)
-                if signal != .none {
-                    return
-                }
-                if !keep {
-                    break
-                }
+            let keep = truthy(self, t)
+            if signal != .none {
+                return false
             }
-            if keep {
-                comprehend(kind, element, value, targets, iters, conds, at + 1, out, outValues)
-                if signal != .none {
-                    return
-                }
+            if !keep {
+                return true
             }
         }
+        if at + 1 < targets.count {
+            comprehend(kind, element, value, targets, iters, conds, at + 1, out, outValues)
+            return signal == .none
+        }
+        // The last `for`: an element.
+        if !spend() {
+            return false
+        }
+        let v = eval(element)
+        if signal != .none {
+            return false
+        }
+        out.append(v)
+        if kind == 2 {
+            let second = eval(value)
+            if signal != .none {
+                return false
+            }
+            outValues.append(second)
+        }
+        true
     }
 
     // ---- calls ----
@@ -689,6 +748,7 @@ struct Interp {
                     return .none
                 }
                 line = prog.lines[n]
+                freshGenerator = -1
                 return callMethod(self, receiver, name, args, kwNames, kwValues)
             }
             _ -> {}
@@ -702,6 +762,7 @@ struct Interp {
             return .none
         }
         line = prog.lines[n]
+        freshGenerator = -1
         callValue(f, args, kwNames, kwValues)
     }
 
@@ -842,6 +903,10 @@ struct Interp {
             }
         }
 
+        if def.isGenerator {
+            // Nothing of it runs yet: it's a generator, with its arguments.
+            return makeGenerator(self, id, e, if c.owner >= 0 && !args.isEmpty { args[0] } else { curSelf })
+        }
         let savedEnv = env
         let savedName = funcName
         let savedClass = curClass
@@ -855,10 +920,6 @@ struct Interp {
         }
         depth += 1
         var result = Value.none
-        if def.isGenerator {
-            lists.append([])
-            yields.append(lists.count - 1)
-        }
         if def.isLambda {
             result = eval(def.body[0])
         } else {
@@ -872,13 +933,6 @@ struct Interp {
                 result = retval
                 retval = .none
                 signal = .none
-            }
-        }
-        if def.isGenerator {
-            // (Everything it yields is worked out at once: see the README.)
-            let sink = yields.removeLast()
-            if signal == .none {
-                result = newIterator(lists[sink], "generator")
             }
         }
         depth -= 1
@@ -1197,11 +1251,9 @@ struct Interp {
                     i += 1
                 }
             }
-            _ -> {
+            .tuple(_), .str(_), .dict(_), .set(_) -> {
+                // (What these have is taken as it is when the loop starts.)
                 let items = iterate(self, iterable)
-                if signal != .none {
-                    return
-                }
                 for item in items {
                     if simple != "" {
                         envs[env].vars[simple] = item
@@ -1217,6 +1269,49 @@ struct Interp {
                         break
                     }
                     if how == 2 {
+                        return
+                    }
+                }
+            }
+            _ -> {
+                // Anything else gives its values one at a time, as the
+                // loop asks for them.
+                let forLine = prog.lines[iter]
+                line = forLine
+                let closes = loopGenerator(self, iter, iterable)
+                let source = getIter(self, iterable)
+                if signal != .none {
+                    return
+                }
+                while true {
+                    line = forLine
+                    let item = nextValue(self, source)
+                    if signal != .none {
+                        return
+                    }
+                    if isAbsent(item) {
+                        break
+                    }
+                    if simple != "" {
+                        envs[env].vars[simple] = item
+                    } else {
+                        assignTo(target, item)
+                        if signal != .none {
+                            return
+                        }
+                    }
+                    let how = loopBody(body)
+                    if how == 1 {
+                        broke = true
+                        if closes >= 0 {
+                            genAbandon(self, closes)
+                        }
+                        break
+                    }
+                    if how == 2 {
+                        if closes >= 0 && signal == .returning {
+                            genAbandon(self, closes)
+                        }
                         return
                     }
                 }
@@ -1277,9 +1372,7 @@ struct Interp {
     // a, b = value (and a, *rest = value).
     fn unpack(_ targets: [Int], _ v: Value, _ at: Int) {
         line = prog.lines[at]
-        let items = iterate(self, v)
-        if signal != .none {
-            signal = .none
+        if !isIterable(self, v) {
             throw("TypeError", "cannot unpack non-iterable {typeName(self, v)} object")
             return
         }
@@ -1289,6 +1382,29 @@ struct Interp {
                 .starred(_) -> { star = i }
                 _ -> {}
             }
+        }
+        var lazy = false
+        match v {
+            .iterator(_) -> { lazy = star < 0 }
+            .instance(_) -> { lazy = star < 0 }
+            _ -> {}
+        }
+        var items: [Value] = []
+        if lazy {
+            // No more is taken of it than shows there are too many.
+            let source = getIter(self, v)
+            while signal == .none && items.count <= targets.count {
+                let item = nextValue(self, source)
+                if signal != .none || isAbsent(item) {
+                    break
+                }
+                items.append(item)
+            }
+        } else {
+            items = iterate(self, v)
+        }
+        if signal != .none {
+            return
         }
         if star < 0 {
             if items.count > targets.count {

@@ -1,0 +1,433 @@
+// Iteration, a value at a time. `getIter` gives the iterator of anything
+// that can be looped over, and `nextValue` its next value: `for` loops,
+// `next`, `zip`, `in`, unpacking and the rest all go through these two,
+// so every one of them works with every kind of iterator, and none takes
+// more values than it uses. (`iterate`, in ops.tsl, is for what needs all
+// the values at once.)
+
+fn makeIter(_ it: bind Interp, _ p: PyIter) -> Value {
+    it.iterators.append(p)
+    Value.iterator(id: it.iterators.count - 1)
+}
+
+// Whether it's the value that stands for "no value" (an iterator with
+// no more, a generator that didn't stop at a `yield`).
+fn isAbsent(_ v: Value) -> Bool {
+    match v {
+        .absent -> true
+        _ -> false
+    }
+}
+
+// Whether a value can be looped over.
+fn isIterable(_ it: bind Interp, _ v: Value) -> Bool {
+    match v {
+        .list(_) -> true
+        .tuple(_) -> true
+        .str(_) -> true
+        .dict(_) -> true
+        .set(_) -> true
+        .range(_, _, _) -> true
+        .iterator(_) -> true
+        .file(_) -> true
+        .instance(id) -> {
+            let cls = it.instances[id].cls
+            classAttr(it, cls, "__iter__") != Value.absent || classAttr(it, cls, "__getitem__") != Value.absent
+        }
+        _ -> false
+    }
+}
+
+// iter(v): something `nextValue` takes. Raises a TypeError for what can't
+// be looped over.
+fn getIter(_ it: bind Interp, _ v: Value) -> Value {
+    match v {
+        .iterator(_) -> { return v }
+        .file(_) -> { return v }
+        .list(id) -> { return makeIter(it, PyIter(kind: "list_iterator", mode: IterMode.list, ref: id)) }
+        .range(start, stop, step) -> {
+            return makeIter(it, PyIter(pos: start, kind: "range_iterator", mode: IterMode.range, stop: stop, step: step))
+        }
+        .tuple(id) -> { return makeIter(it, PyIter(items: it.lists[id], kind: "tuple_iterator")) }
+        .str(_) -> { return makeIter(it, PyIter(items: iterate(it, v), kind: "str_iterator")) }
+        .dict(id) -> { return makeIter(it, PyIter(items: dictKeys(it.dicts[id]), kind: "dict_keyiterator")) }
+        .set(id) -> { return makeIter(it, PyIter(items: dictKeys(it.dicts[id]), kind: "set_iterator")) }
+        .instance(id) -> {
+            let cls = it.instances[id].cls
+            let method = classAttr(it, cls, "__iter__")
+            if method != Value.absent {
+                let made = it.callValue(method, [v], [], [])
+                if it.signal != .none {
+                    return Value.none
+                }
+                var fine = false
+                match made {
+                    .iterator(_) -> { fine = true }
+                    .file(_) -> { fine = true }
+                    .instance(other) -> { fine = classAttr(it, it.instances[other].cls, "__next__") != Value.absent }
+                    _ -> {}
+                }
+                if !fine {
+                    return it.throw("TypeError", "iter() returned non-iterator of type '{typeName(it, made)}'")
+                }
+                return made
+            }
+            if classAttr(it, cls, "__getitem__") != Value.absent {
+                // The old way: v[0], v[1], … until an IndexError.
+                return makeIter(it, PyIter(kind: "iterator", mode: IterMode.getitem, sources: [v]))
+            }
+        }
+        _ -> {}
+    }
+    it.throw("TypeError", "'{typeName(it, v)}' object is not iterable")
+}
+
+// What a StopIteration carries: `return value` in a generator.
+fn stopValueOf(_ it: bind Interp, _ raised: Value) -> Value {
+    match raised {
+        .instance(id) -> {
+            match it.instances[id].fields["args"] ?? Value.none {
+                .tuple(t) -> { return it.lists[t].first ?? Value.none }
+                _ -> {}
+            }
+        }
+        _ -> {}
+    }
+    Value.none
+}
+
+// If a StopIteration is on its way out, it ends here (true), and what it
+// carried is in `it.stopValue`.
+fn stopCaught(_ it: bind Interp) -> Bool {
+    if it.signal != .raising {
+        return false
+    }
+    if !exceptionMatches(it, it.exc, .klass(id: it.classIds["StopIteration"] ?? -1)) {
+        return false
+    }
+    it.stopValue = stopValueOf(it, it.exc)
+    it.signal = .none
+    it.exc = .none
+    true
+}
+
+// The next value of an iterator, or `.absent` when it has no more (then, for
+// a generator, `it.stopValue` is what it returned). Also `.absent` when
+// something was raised: look at `it.signal` first.
+fn nextValue(_ it: bind Interp, _ iterator: Value) -> Value {
+    // (Counted, so that one that never ends can be stopped.)
+    if !it.spend() {
+        return Value.absent
+    }
+    match iterator {
+        .iterator(id) -> {
+            // (The plain kinds are dealt with here.)
+            let mode = it.iterators[id].mode
+            if mode == IterMode.generator {
+                return genResume(it, it.iterators[id].ref, Value.none, false)
+            }
+            let at = it.iterators[id].pos
+            if mode == IterMode.list {
+                let from = it.iterators[id].ref
+                if at < it.lists[from].count {
+                    it.iterators[id].pos = at + 1
+                    return it.lists[from][at]
+                }
+                // (Used up for good, even if the list grows later.)
+                it.iterators[id].mode = IterMode.items
+                it.iterators[id].pos = 0
+            } else if mode == IterMode.items {
+                if at < it.iterators[id].items.count {
+                    it.iterators[id].pos = at + 1
+                    return it.iterators[id].items[at]
+                }
+            } else if mode == IterMode.range {
+                let stop = it.iterators[id].stop
+                let step = it.iterators[id].step
+                if (step > 0 && at < stop) || (step < 0 && at > stop) {
+                    var after = at.wrappingAdd(step)
+                    if (step > 0 && after < at) || (step < 0 && after > at) {
+                        after = stop
+                    }
+                    it.iterators[id].pos = after
+                    return .int(i: at)
+                }
+            } else {
+                let v = iterNext(it, id, mode)
+                if !isAbsent(v) {
+                    return v
+                }
+            }
+            it.stopValue = .none
+            return Value.absent
+        }
+        .instance(id) -> {
+            let method = classAttr(it, it.instances[id].cls, "__next__")
+            if method == Value.absent {
+                it.throw("TypeError", "'{typeName(it, iterator)}' object is not an iterator")
+                return Value.absent
+            }
+            let v = it.callValue(method, [iterator], [], [])
+            if it.signal != .none {
+                stopCaught(it)
+                return Value.absent
+            }
+            return v
+        }
+        .file(id) -> {
+            let at = it.files[id].pos
+            if at < it.files[id].lines.count {
+                it.files[id].pos = at + 1
+                return .str(s: it.files[id].lines[at])
+            }
+            it.stopValue = .none
+            return Value.absent
+        }
+        _ -> {
+            it.throw("TypeError", "'{typeName(it, iterator)}' object is not an iterator")
+        }
+    }
+    Value.absent
+}
+
+// The next value of each of `sources`, or nil if one of them has no more
+// (or raised).
+fn nextRow(_ it: bind Interp, _ sources: [Value]) -> [Value]? {
+    var row: [Value] = []
+    for s in sources {
+        let v = nextValue(it, s)
+        if it.signal != .none || isAbsent(v) {
+            return nil
+        }
+        row.append(v)
+    }
+    row
+}
+
+// The next value of an iterator that works its values out.
+fn iterNext(_ it: bind Interp, _ id: Int, _ mode: IterMode) -> Value {
+    match mode {
+        .map -> {
+            if let row = nextRow(it, it.iterators[id].sources) {
+                return it.callValue(it.iterators[id].function, row, [], [])
+            }
+        }
+        .zip -> {
+            if it.iterators[id].sources.isEmpty {
+                return Value.absent
+            }
+            if let row = nextRow(it, it.iterators[id].sources) {
+                return it.newTuple(row)
+            }
+        }
+        .filter -> {
+            let source = it.iterators[id].sources[0]
+            let test = it.iterators[id].function
+            while true {
+                let v = nextValue(it, source)
+                if it.signal != .none || isAbsent(v) {
+                    return Value.absent
+                }
+                var keep = v
+                if test != Value.none {
+                    keep = it.callValue(test, [v], [], [])
+                    if it.signal != .none {
+                        return Value.absent
+                    }
+                }
+                let yes = truthy(it, keep)
+                if it.signal != .none {
+                    return Value.absent
+                }
+                if yes {
+                    return v
+                }
+            }
+        }
+        .enumerate -> {
+            let v = nextValue(it, it.iterators[id].sources[0])
+            if it.signal != .none || isAbsent(v) {
+                return Value.absent
+            }
+            let at = it.iterators[id].pos
+            it.iterators[id].pos = at.wrappingAdd(1)
+            return it.newTuple([.int(i: at), v])
+        }
+        .sentinel -> {
+            let v = it.callValue(it.iterators[id].function, [], [], [])
+            if it.signal != .none {
+                return Value.absent
+            }
+            let last = pyEquals(it, v, it.iterators[id].sentinel)
+            if it.signal != .none {
+                return Value.absent
+            }
+            if !last {
+                return v
+            }
+            it.iterators[id].mode = IterMode.items
+        }
+        .getitem -> {
+            let object = it.iterators[id].sources[0]
+            var getter = Value.absent
+            match object {
+                .instance(o) -> { getter = classAttr(it, it.instances[o].cls, "__getitem__") }
+                _ -> {}
+            }
+            let at = it.iterators[id].pos
+            let v = it.callValue(getter, [object, .int(i: at)], [], [])
+            if it.signal == .none {
+                it.iterators[id].pos = at + 1
+                return v
+            }
+            if it.signal == .raising && exceptionMatches(it, it.exc, .klass(id: it.classIds["IndexError"] ?? -1)) {
+                it.signal = .none
+                it.exc = .none
+                it.iterators[id].mode = IterMode.items
+            } else if stopCaught(it) {
+                it.iterators[id].mode = IterMode.items
+            }
+        }
+        .genexpr -> { return genexprNext(it, id, it.iterators[id]) }
+        _ -> {}
+    }
+    Value.absent
+}
+
+// Every value an iterator has left.
+fn collect(_ it: bind Interp, _ iterator: Value) -> [Value] {
+    var out: [Value] = []
+    while true {
+        let v = nextValue(it, iterator)
+        if it.signal != .none || isAbsent(v) {
+            break
+        }
+        out.append(v)
+    }
+    out
+}
+
+// `item in container`, for what has to be looked through: it stops at the
+// first one that's equal.
+fn iterContains(_ it: bind Interp, _ container: Value, _ item: Value) -> Bool {
+    let source = getIter(it, container)
+    if it.signal != .none {
+        return false
+    }
+    while true {
+        let v = nextValue(it, source)
+        if it.signal != .none || isAbsent(v) {
+            return false
+        }
+        if pyEquals(it, v, item) {
+            return true
+        }
+        if it.signal != .none {
+            return false
+        }
+    }
+    false
+}
+
+// ---- generator expressions ----
+
+// (element for target in iter if cond …), made but not run: `first` is the
+// iterator of its first `for`, which is worked out where it's written.
+fn makeGenexpr(_ it: bind Interp, _ n: Int, _ first: Value) -> Value {
+    let inner = it.newEnv(it.env)
+    // It runs later: the variables around it stay.
+    var e = inner
+    while e >= 0 && !it.envs[e].captured {
+        it.envs[e].captured = true
+        e = it.envs[e].parent
+    }
+    makeIter(it, PyIter(kind: "generator", mode: IterMode.genexpr, sources: [first], ref: n, env: inner,
+                        owner: it.curClass, receiver: it.curSelf))
+}
+
+// The next value of a generator expression. `sources` has the iterator of
+// each `for` clause it's inside of: the last one moves on, and when it
+// has no more, the one before it does.
+fn genexprNext(_ it: bind Interp, _ id: Int, _ p: PyIter) -> Value {
+    if p.done {
+        return Value.absent
+    }
+    if p.running {
+        it.throw("ValueError", "generator already executing")
+        return Value.absent
+    }
+    if it.depth >= 600 {
+        it.throw("RecursionError", "maximum recursion depth exceeded")
+        return Value.absent
+    }
+    var result = Value.absent
+    match it.prog.nodes[p.ref] {
+        .comp(_, element, _, targets, iters, conds) -> {
+            var active = p.sources
+            var changed = false
+            it.iterators[id].running = true
+            let caller = enterBody(it, p.env, "<genexpr>", p.owner, p.receiver)
+            it.line = it.prog.lines[element]
+            while !active.isEmpty {
+                let level = active.count - 1
+                let v = nextValue(it, active[level])
+                if it.signal != .none {
+                    break
+                }
+                if isAbsent(v) {
+                    active.removeLast()
+                    changed = true
+                    continue
+                }
+                it.assignTo(targets[level], v)
+                if it.signal != .none {
+                    break
+                }
+                var keep = true
+                for c in conds[level] {
+                    let t = it.eval(c)
+                    if it.signal != .none {
+                        break
+                    }
+                    keep = truthy(it, t)
+                    if it.signal != .none || !keep {
+                        break
+                    }
+                }
+                if it.signal != .none {
+                    break
+                }
+                if !keep {
+                    continue
+                }
+                if level == targets.count - 1 {
+                    result = it.eval(element)
+                    break
+                }
+                let iterable = it.eval(iters[level + 1])
+                if it.signal != .none {
+                    break
+                }
+                let inner = getIter(it, iterable)
+                if it.signal != .none {
+                    break
+                }
+                active.append(inner)
+                changed = true
+            }
+            if it.signal != .none {
+                result = Value.absent
+            }
+            leaveBody(it, caller)
+            it.iterators[id].running = false
+            if isAbsent(result) {
+                it.iterators[id].done = true
+                it.iterators[id].sources = []
+            } else if changed {
+                it.iterators[id].sources = active
+            }
+        }
+        _ -> {}
+    }
+    result
+}

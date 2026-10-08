@@ -44,6 +44,8 @@ enum Node {
     formatted(value: Int, conversion: String, spec: Int)
     starred(value: Int)
     yieldExpr(value: Int)
+    // yield from value
+    yieldFrom(value: Int)
     walrus(target: String, value: Int)
 
     // ---- statements ----
@@ -92,6 +94,9 @@ struct Program {
     nodes: [Node] = []
     // The line each node is on.
     lines: [Int] = []
+    // For each node: a statement with a `yield` somewhere in it (not in a
+    // function made there). A generator runs those a step at a time.
+    yielding: [Bool] = []
     defs: [FuncDef] = []
     // The module's statements.
     body: [Int] = []

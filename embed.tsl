@@ -45,7 +45,6 @@ fn reset(_ it: bind Interp) {
     it.depth = 0
     it.funcName = "<module>"
     it.curClass = -1
-    it.yields = []
     it.handling = []
 }
 

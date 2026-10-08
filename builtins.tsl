@@ -661,11 +661,30 @@ fn callBuiltin(_ it: bind Interp, _ name: String, _ args: [Value], _ kwNames: [S
             if !arity(it, name, args, 1, 2) {
                 return Value.none
             }
+            var total = if args.count > 1 { args[1] } else { Value.int(i: 0) }
+            match args[0] {
+                .iterator(_) -> {
+                    // (As its values come.)
+                    while true {
+                        let item = nextValue(it, args[0])
+                        if it.signal != .none {
+                            return Value.none
+                        }
+                        if isAbsent(item) {
+                            return total
+                        }
+                        total = binaryOp(it, .add, total, item)
+                        if it.signal != .none {
+                            return Value.none
+                        }
+                    }
+                }
+                _ -> {}
+            }
             let items = iterate(it, args[0])
             if it.signal != .none {
                 return Value.none
             }
-            var total = if args.count > 1 { args[1] } else { Value.int(i: 0) }
             for item in items {
                 total = binaryOp(it, .add, total, item)
                 if it.signal != .none {
@@ -694,7 +713,7 @@ fn callBuiltin(_ it: bind Interp, _ name: String, _ args: [Value], _ kwNames: [S
             if !arity(it, name, args, 1, 2) {
                 return Value.none
             }
-            let items = iterate(it, args[0])
+            let source = getIter(it, args[0])
             if it.signal != .none {
                 return Value.none
             }
@@ -706,95 +725,68 @@ fn callBuiltin(_ it: bind Interp, _ name: String, _ args: [Value], _ kwNames: [S
                 .int(i) -> { start = i }
                 _ -> {}
             }
-            var out: [Value] = []
-            for i in items.indices {
-                out.append(it.newTuple([.int(i: start + i), items[i]]))
-            }
-            it.newIterator(out, "enumerate")
+            makeIter(it, PyIter(pos: start, kind: "enumerate", mode: IterMode.enumerate, sources: [source]))
         }
         "zip" -> {
-            var columns: [[Value]] = []
-            var shortest = -1
+            var sources: [Value] = []
             for a in args {
-                let items = iterate(it, a)
+                let source = getIter(it, a)
                 if it.signal != .none {
                     return Value.none
                 }
-                if shortest < 0 || items.count < shortest {
-                    shortest = items.count
-                }
-                columns.append(items)
+                sources.append(source)
             }
-            var out: [Value] = []
-            if shortest > 0 {
-                for i in 0..shortest {
-                    var row: [Value] = []
-                    for c in columns {
-                        row.append(c[i])
-                    }
-                    out.append(it.newTuple(row))
-                }
-            }
-            it.newIterator(out, "zip")
+            makeIter(it, PyIter(kind: "zip", mode: IterMode.zip, sources: sources))
         }
         "map" -> {
-            if !arity(it, name, args, 2, 9) {
-                return Value.none
+            if args.count < 2 {
+                return it.throw("TypeError", "map() must have at least two arguments.")
             }
-            var columns: [[Value]] = []
-            var shortest = -1
+            var sources: [Value] = []
             for i in 1..args.count {
-                let items = iterate(it, args[i])
+                let source = getIter(it, args[i])
                 if it.signal != .none {
                     return Value.none
                 }
-                if shortest < 0 || items.count < shortest {
-                    shortest = items.count
-                }
-                columns.append(items)
+                sources.append(source)
             }
-            var out: [Value] = []
-            if shortest > 0 {
-                for i in 0..shortest {
-                    var row: [Value] = []
-                    for c in columns {
-                        row.append(c[i])
-                    }
-                    let r = it.callValue(args[0], row, [], [])
-                    if it.signal != .none {
-                        return Value.none
-                    }
-                    out.append(r)
-                }
-            }
-            it.newIterator(out, "map")
+            makeIter(it, PyIter(kind: "map", mode: IterMode.map, sources: sources, function: args[0]))
         }
         "filter" -> {
             if !arity(it, name, args, 2, 2) {
                 return Value.none
             }
-            let items = iterate(it, args[1])
+            let source = getIter(it, args[1])
             if it.signal != .none {
                 return Value.none
             }
-            var out: [Value] = []
-            for item in items {
-                var keep = item
-                if args[0] != Value.none {
-                    keep = it.callValue(args[0], [item], [], [])
-                    if it.signal != .none {
-                        return Value.none
-                    }
-                }
-                if truthy(it, keep) {
-                    out.append(item)
-                }
-            }
-            it.newIterator(out, "filter")
+            makeIter(it, PyIter(kind: "filter", mode: IterMode.filter, sources: [source], function: args[0]))
         }
         "reversed" -> {
             if !arity(it, name, args, 1, 1) {
                 return Value.none
+            }
+            match args[0] {
+                .range(start, stop, step) -> {
+                    // Backwards from its last number, without making them all.
+                    let count = rangeLength(start, stop, step)
+                    if count == 0 {
+                        return it.newIterator([], "range_iterator")
+                    }
+                    let last = start + (count - 1) * step
+                    return makeIter(it, PyIter(pos: last, kind: "range_iterator", mode: IterMode.range,
+                                               stop: start.wrappingSubtract(step), step: 0 - step))
+                }
+                .instance(id) -> {
+                    let method = classAttr(it, it.instances[id].cls, "__reversed__")
+                    if method != Value.absent {
+                        return it.callValue(method, [args[0]], [], [])
+                    }
+                }
+                .iterator(_) -> {
+                    return it.throw("TypeError", "'{typeName(it, args[0])}' object is not reversible")
+                }
+                _ -> {}
             }
             let items = iterate(it, args[0])
             if it.signal != .none {
@@ -806,11 +798,19 @@ fn callBuiltin(_ it: bind Interp, _ name: String, _ args: [Value], _ kwNames: [S
             if !arity(it, name, args, 1, 1) {
                 return Value.none
             }
-            let items = iterate(it, args[0])
+            // (It stops at the first value that settles it.)
+            let source = getIter(it, args[0])
             if it.signal != .none {
                 return Value.none
             }
-            for item in items {
+            while true {
+                let item = nextValue(it, source)
+                if it.signal != .none {
+                    return Value.none
+                }
+                if isAbsent(item) {
+                    break
+                }
                 let yes = truthy(it, item)
                 if it.signal != .none {
                     return Value.none
@@ -1042,47 +1042,20 @@ fn callBuiltin(_ it: bind Interp, _ name: String, _ args: [Value], _ kwNames: [S
             }
         }
         "iter" -> {
-            if !arity(it, name, args, 1, 1) {
+            if !arity(it, name, args, 1, 2) {
                 return Value.none
             }
-            match args[0] {
-                .iterator(_) -> args[0]
-                .instance(id) -> {
-                    let method = classAttr(it, it.instances[id].cls, "__iter__")
-                    if method != Value.absent {
-                        return it.callValue(method, [args[0]], [], [])
-                    }
-                    let items = iterate(it, args[0])
-                    if it.signal != .none {
-                        return Value.none
-                    }
-                    it.newIterator(items, "iterator")
-                }
-                _ -> {
-                    let items = iterate(it, args[0])
-                    if it.signal != .none {
-                        return Value.none
-                    }
-                    it.newIterator(items, typeName(it, args[0]) + "_iterator")
-                }
+            if args.count == 2 {
+                // iter(function, sentinel): function() until it gives the sentinel.
+                return makeIter(it, PyIter(kind: "callable_iterator", mode: IterMode.sentinel, function: args[0], sentinel: args[1]))
             }
+            getIter(it, args[0])
         }
         "next" -> {
             if !arity(it, name, args, 1, 2) {
                 return Value.none
             }
             match args[0] {
-                .iterator(id) -> {
-                    let at = it.iterators[id].pos
-                    if at < it.iterators[id].items.count {
-                        it.iterators[id].pos = at + 1
-                        return it.iterators[id].items[at]
-                    }
-                    if args.count > 1 {
-                        return args[1]
-                    }
-                    it.throw("StopIteration", "")
-                }
                 .instance(id) -> {
                     let method = classAttr(it, it.instances[id].cls, "__next__")
                     if method == Value.absent {
@@ -1097,18 +1070,20 @@ fn callBuiltin(_ it: bind Interp, _ name: String, _ args: [Value], _ kwNames: [S
                     }
                     v
                 }
-                .file(id) -> {
-                    let at = it.files[id].pos
-                    if at < it.files[id].lines.count {
-                        it.files[id].pos = at + 1
-                        return .str(s: it.files[id].lines[at])
+                _ -> {
+                    it.stopValue = .none
+                    let v = nextValue(it, args[0])
+                    if it.signal != .none {
+                        return Value.none
+                    }
+                    if !isAbsent(v) {
+                        return v
                     }
                     if args.count > 1 {
                         return args[1]
                     }
-                    it.throw("StopIteration", "")
+                    raiseStop(it, it.stopValue)
                 }
-                _ -> it.throw("TypeError", "'{typeName(it, args[0])}' object is not an iterator")
             }
         }
         "open" -> {
@@ -1320,6 +1295,7 @@ fn builtinNames() -> [String] {
 // The built-in exceptions, each with the one it's a kind of.
 fn exceptionClasses() -> [(String, String)] {
     [("BaseException", "object"), ("Exception", "BaseException"), ("SystemExit", "BaseException"),
+     ("GeneratorExit", "BaseException"),
      ("KeyboardInterrupt", "BaseException"), ("ArithmeticError", "Exception"), ("ZeroDivisionError", "ArithmeticError"),
      ("OverflowError", "ArithmeticError"), ("AssertionError", "Exception"), ("AttributeError", "Exception"),
      ("EOFError", "Exception"), ("ImportError", "Exception"), ("ModuleNotFoundError", "ImportError"),

@@ -391,7 +391,16 @@ fn toRepr(_ it: bind Interp, _ v: Value) -> String {
             }
         }
         .module(name) -> "<module '{name}'>"
-        .iterator(id) -> "<{it.iterators[id].kind} object>"
+        .iterator(id) -> {
+            let p = it.iterators[id]
+            if p.mode == IterMode.generator {
+                return "<generator object {it.generators[p.ref].name} at 0x{intInBase(4391000000 + id * 208, base: 16, prefix: "")}>"
+            }
+            if p.mode == IterMode.genexpr {
+                return "<generator object <genexpr> at 0x{intInBase(4391000000 + id * 208, base: 16, prefix: "")}>"
+            }
+            "<{p.kind} object at 0x{intInBase(4391000000 + id * 208, base: 16, prefix: "")}>"
+        }
         .file(id) -> "<_io.TextIOWrapper name={strRepr(it.files[id].path)} mode={strRepr(it.files[id].mode)}>"
         .wrapper(kind, _) -> if kind == 0 { "<staticmethod object>" } else if kind == 1 { "<classmethod object>" } else { "<property object>" }
         .superRef(_, _) -> "<super object>"
@@ -738,20 +747,14 @@ fn contains(_ it: bind Interp, _ container: Value, _ item: Value) -> Bool {
                 }
                 return truthy(it, r)
             }
-            let items = iterate(it, container)
-            if it.signal != .none {
-                return false
-            }
-            listContains(it, items, item)
+            iterContains(it, container, item)
         }
         _ -> {
-            let items = iterate(it, container)
-            if it.signal != .none {
-                it.signal = .none
+            if !isIterable(it, container) {
                 it.throw("TypeError", "argument of type '{typeName(it, container)}' is not iterable")
                 return false
             }
-            listContains(it, items, item)
+            iterContains(it, container, item)
         }
     }
 }
@@ -1308,7 +1311,8 @@ fn unaryOp(_ it: bind Interp, _ op: UnOp, _ v: Value) -> Value {
 
 // ---- iteration ----
 
-// Every item a value gives when it's looped over.
+// Every item a value gives when it's looped over, at once (iterators.tsl
+// has the way to take them one at a time).
 fn iterate(_ it: bind Interp, _ v: Value) -> [Value] {
     match v {
         .list(id) -> it.lists[id]
@@ -1333,14 +1337,16 @@ fn iterate(_ it: bind Interp, _ v: Value) -> [Value] {
         }
         .iterator(id) -> {
             // What's left of it; then it's used up.
-            let from = it.iterators[id].pos
-            let items = it.iterators[id].items
-            it.iterators[id].pos = items.count
-            if from == 0 {
-                items
-            } else {
-                items.slice(from: from, to: items.count)
+            if it.iterators[id].mode == IterMode.items {
+                let from = it.iterators[id].pos
+                let items = it.iterators[id].items
+                it.iterators[id].pos = items.count
+                if from == 0 {
+                    return items
+                }
+                return items.slice(from: from, to: items.count)
             }
+            collect(it, v)
         }
         .file(id) -> {
             var out: [Value] = []
@@ -1351,67 +1357,17 @@ fn iterate(_ it: bind Interp, _ v: Value) -> [Value] {
             it.files[id].pos = it.files[id].lines.count
             out
         }
-        .instance(id) -> {
-            let cls = it.instances[id].cls
-            let method = classAttr(it, cls, "__iter__")
-            if method != Value.absent {
-                let iterator = it.callValue(method, [v], [], [])
-                if it.signal != .none {
-                    return []
-                }
-                return drain(it, iterator)
+        .instance(_) -> {
+            let iterator = getIter(it, v)
+            if it.signal != .none {
+                return []
             }
-            let getter = classAttr(it, cls, "__getitem__")
-            if getter != Value.absent {
-                // The old way: v[0], v[1], … until an IndexError.
-                var out: [Value] = []
-                var i = 0
-                while true {
-                    let item = it.callValue(getter, [v, .int(i: i)], [], [])
-                    if it.signal != .none {
-                        if exceptionMatches(it, it.exc, .klass(id: it.classIds["IndexError"] ?? -1)) {
-                            it.signal = .none
-                        }
-                        break
-                    }
-                    out.append(item)
-                    i += 1
-                }
-                return out
-            }
-            it.throw("TypeError", "'{typeName(it, v)}' object is not iterable")
-            []
+            collect(it, iterator)
         }
         _ -> {
             it.throw("TypeError", "'{typeName(it, v)}' object is not iterable")
             []
         }
-    }
-}
-
-// The items of what `__iter__` gave: another iterable, or an object with
-// `__next__`, called until it raises StopIteration.
-fn drain(_ it: bind Interp, _ iterator: Value) -> [Value] {
-    match iterator {
-        .instance(id) -> {
-            let next = classAttr(it, it.instances[id].cls, "__next__")
-            if next == Value.absent {
-                return iterate(it, iterator)
-            }
-            var out: [Value] = []
-            while true {
-                let item = it.callValue(next, [iterator], [], [])
-                if it.signal != .none {
-                    if it.signal == .raising && exceptionMatches(it, it.exc, .klass(id: it.classIds["StopIteration"] ?? -1)) {
-                        it.signal = .none
-                    }
-                    break
-                }
-                out.append(item)
-            }
-            out
-        }
-        _ -> iterate(it, iterator)
     }
 }
 
@@ -1761,6 +1717,10 @@ fn getAttr(_ it: bind Interp, _ o: Value, _ name: String) -> Value {
             let fallback = classAttr(it, cls, "__getattr__")
             if fallback != Value.absent {
                 return it.callValue(fallback, [o, .str(s: name)], [], [])
+            }
+            if name == "value" && isSubclass(it, cls, it.classIds["StopIteration"] ?? -1) {
+                // What a generator returned.
+                return stopValueOf(it, o)
             }
             noAttribute(it, o, name)
         }
