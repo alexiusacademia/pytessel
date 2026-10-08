@@ -638,6 +638,7 @@ fn callBuiltin(_ it: bind Interp, _ name: String, _ args: [Value], _ kwNames: [S
         }
         "int" -> toInt(it, args)
         "bytes", "bytearray" -> makeBytes(it, name, args, kwNames, kwValues)
+        "slice" -> makeSlice(it, args)
         "float" -> toFloat(it, args)
         "isinstance" -> {
             if !arity(it, name, args, 2, 2) {
@@ -1352,7 +1353,7 @@ fn snapshot(_ it: bind Interp, _ e: Int) -> Value {
 // The names every program starts with.
 fn builtinNames() -> [String] {
     ["len", "range", "print", "str", "int", "float", "isinstance", "bool", "list", "tuple", "dict", "set", "frozenset",
-     "bytes", "bytearray",
+     "bytes", "bytearray", "slice",
      "abs", "min", "max", "sum", "sorted", "enumerate", "zip", "map", "filter", "reversed", "any", "all", "repr",
      "ascii", "type", "issubclass", "input", "ord", "chr", "round", "divmod", "pow", "hex", "bin", "oct", "callable",
      "getattr", "hasattr", "setattr", "delattr", "iter", "next", "open", "super", "staticmethod", "classmethod",

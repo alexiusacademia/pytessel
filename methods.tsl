@@ -14,6 +14,7 @@ fn hasMethod(_ type: String, _ name: String) -> Bool {
                   "symmetric_difference", "update", "issubset", "issuperset", "isdisjoint",
                   "intersection_update", "difference_update"].contains(name)
         "tuple" -> ["count", "index"].contains(name)
+        "slice" -> name == "indices"
         "TextIOWrapper", "BufferedReader", "BufferedWriter" -> ["read", "readline", "readlines", "write", "writelines", "close", "flush"].contains(name)
         "int" -> ["bit_length", "is_integer", "conjugate", "to_bytes", "from_bytes"].contains(name)
         "bytes", "bytearray" -> {
@@ -985,6 +986,7 @@ fn callMethod(_ it: bind Interp, _ receiver: Value, _ name: String, _ args: [Val
         }
         .file(id) -> fileMethod(it, id, receiver, name, args)
         .bytes(id, mutable) -> bytesMethod(it, id, mutable, name, args, kwNames, kwValues)
+        .slice(id) -> sliceMethod(it, id, name, args)
         .iterator(id) -> {
             if name == "__next__" {
                 return callBuiltin(it, "next", [receiver], [], [])

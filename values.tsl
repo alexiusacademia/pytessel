@@ -30,6 +30,10 @@ enum Value {
     file(id: Int)
     // bytes, or a bytearray (`mutable`): `Interp.blobs[id]`.
     bytes(id: Int, mutable: Bool)
+    // slice(start, stop, step): the three are `Interp.lists[id]`.
+    slice(id: Int)
+    // `...`
+    ellipsis
     // staticmethod (0), classmethod (1) and property (2) around `cells[id]`.
     wrapper(kind: Int, id: Int)
     // super(): the object (`cells[cell]`) seen as the classes after `cls`.

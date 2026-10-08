@@ -1484,6 +1484,9 @@ struct Parser {
         let t = text()
         if k == .name {
             advance()
+            if t == "Ellipsis" {
+                return add(.ellipsisLit, at)
+            }
             return add(.name(id: t), at)
         }
         if k == .int {
@@ -1556,7 +1559,7 @@ struct Parser {
             }
             if t == "..." {
                 advance()
-                return add(.noneLit, at)
+                return add(.ellipsisLit, at)
             }
         }
         fail(if k == .indent { "unexpected indent" } else { "invalid syntax" })

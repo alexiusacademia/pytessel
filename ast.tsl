@@ -11,6 +11,8 @@ enum CmpOp { eq, ne, lt, le, gt, ge, isOp, isNot, inOp, notIn }
 enum Node {
     // ---- expressions ----
     noneLit
+    // `...`
+    ellipsisLit
     trueLit
     falseLit
     intLit(value: Int)

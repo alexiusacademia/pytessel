@@ -237,6 +237,7 @@ struct Interp {
             .strLit(v) -> .str(s: v)
             .bytesLit(v) -> newBytes(v, false)
             .noneLit -> .none
+            .ellipsisLit -> .ellipsis
             .trueLit -> .bool(b: true)
             .falseLit -> .bool(b: false)
             .binary(op, l, r) -> {
@@ -321,14 +322,17 @@ struct Interp {
                 }
                 match prog.nodes[index] {
                     .slice(lower, upper, step) -> {
-                        let lo = sliceBound(lower)
-                        let hi = sliceBound(upper)
-                        let st = sliceBound(step)
-                        if signal != .none {
-                            return .none
+                        // (An object of a class is given the slice itself.)
+                        if takesSlices(o) {
+                            let lo = sliceBound(lower)
+                            let hi = sliceBound(upper)
+                            let st = sliceBound(step)
+                            if signal != .none {
+                                return .none
+                            }
+                            line = prog.lines[n]
+                            return getSlice(self, o, lo, hi, st)
                         }
-                        line = prog.lines[n]
-                        return getSlice(self, o, lo, hi, st)
                     }
                     _ -> {}
                 }
@@ -531,9 +535,22 @@ struct Interp {
                 line = prog.lines[n]
                 throw("SyntaxError", "can't use starred expression here")
             }
-            .slice(_, _, _) -> {
-                line = prog.lines[n]
-                throw("TypeError", "slices can only be used to index")
+            .slice(lower, upper, step) -> {
+                // a:b:c as a value: for an object's __getitem__, or one of
+                // several in `x[1:2, ::3]`.
+                var parts: [Value] = []
+                for part in [lower, upper, step] {
+                    if part < 0 {
+                        parts.append(.none)
+                    } else {
+                        parts.append(eval(part))
+                        if signal != .none {
+                            return .none
+                        }
+                    }
+                }
+                lists.append(parts)
+                Value.slice(id: lists.count - 1)
             }
             _ -> {
                 exec(n)
@@ -553,12 +570,8 @@ struct Interp {
         }
         match v {
             .int(i) -> { return i }
-            .bool(b) -> { return if b { 1 } else { 0 } }
             .none -> { return nil }
-            _ -> {
-                throw("TypeError", "slice indices must be integers or None")
-                return nil
-            }
+            _ -> { return sliceIndex(self, v) }
         }
     }
 
@@ -1354,15 +1367,17 @@ struct Interp {
                 }
                 match prog.nodes[index] {
                     .slice(lower, upper, step) -> {
-                        let lo = sliceBound(lower)
-                        let hi = sliceBound(upper)
-                        let st = sliceBound(step)
-                        if signal != .none {
+                        if takesSlices(o) {
+                            let lo = sliceBound(lower)
+                            let hi = sliceBound(upper)
+                            let st = sliceBound(step)
+                            if signal != .none {
+                                return
+                            }
+                            line = prog.lines[target]
+                            setSlice(self, o, lo, hi, st, v)
                             return
                         }
-                        line = prog.lines[target]
-                        setSlice(self, o, lo, hi, st, v)
-                        return
                     }
                     _ -> {}
                 }
@@ -1549,15 +1564,17 @@ struct Interp {
                 }
                 match prog.nodes[index] {
                     .slice(lower, upper, step) -> {
-                        let lo = sliceBound(lower)
-                        let hi = sliceBound(upper)
-                        let st = sliceBound(step)
-                        if signal != .none {
+                        if takesSlices(o) {
+                            let lo = sliceBound(lower)
+                            let hi = sliceBound(upper)
+                            let st = sliceBound(step)
+                            if signal != .none {
+                                return
+                            }
+                            line = prog.lines[target]
+                            deleteSlice(self, o, lo, hi, st)
                             return
                         }
-                        line = prog.lines[target]
-                        deleteSlice(self, o, lo, hi, st)
-                        return
                     }
                     _ -> {}
                 }

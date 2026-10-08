@@ -47,7 +47,7 @@ fn mulChecked(_ a: Int, _ b: Int) -> Int? {
 // The names of the built-in types (which are also functions: `int("5")`).
 fn isTypeName(_ name: String) -> Bool {
     match name {
-        "int", "float", "str", "bool", "list", "tuple", "dict", "set", "range", "object", "type", "bytes", "frozenset", "bytearray" -> true
+        "int", "float", "str", "bool", "list", "tuple", "dict", "set", "range", "object", "type", "bytes", "frozenset", "bytearray", "slice" -> true
         _ -> false
     }
 }
@@ -81,6 +81,8 @@ fn typeName(_ it: bind Interp, _ v: Value) -> String {
             }
         }
         .bytes(_, mutable) -> bytesTypeName(mutable)
+        .slice(_) -> "slice"
+        .ellipsis -> "ellipsis"
         .wrapper(kind, _) -> if kind == 0 { "staticmethod" } else if kind == 1 { "classmethod" } else { "property" }
         .superRef(_, _) -> "super"
         .absent -> "?"
@@ -346,7 +348,8 @@ fn toRepr(_ it: bind Interp, _ v: Value) -> String {
         .function(id) -> "<function {it.closures[id].name}>"
         .builtin(name) -> {
             if isTypeName(name) || ["NoneType", "function", "module", "method", "builtin_function_or_method", "generator",
-                                    "TextIOWrapper", "staticmethod", "classmethod", "property", "super"].contains(name) {
+                                    "TextIOWrapper", "staticmethod", "classmethod", "property", "super", "ellipsis",
+                                    "NotImplementedType"].contains(name) {
                 "<class '{name}'>"
             } else if name.hasPrefix("@") {
                 "<built-in method {name.substring(from: 1, to: name.count)}>"
@@ -419,6 +422,8 @@ fn toRepr(_ it: bind Interp, _ v: Value) -> String {
             }
         }
         .bytes(id, mutable) -> if mutable { "bytearray(" + bytesRepr(it.blobs[id]) + ")" } else { bytesRepr(it.blobs[id]) }
+        .slice(id) -> "slice(" + joinReprs(it, it.lists[id]) + ")"
+        .ellipsis -> "Ellipsis"
         .wrapper(kind, _) -> if kind == 0 { "<staticmethod object>" } else if kind == 1 { "<classmethod object>" } else { "<property object>" }
         .superRef(_, _) -> "<super object>"
         .absent -> "<absent>"
@@ -485,6 +490,12 @@ fn pyEquals(_ it: bind Interp, _ a: Value, _ b: Value) -> Bool {
         .bytes(x, _) -> {
             match b {
                 .bytes(y, _) -> x == y || it.blobs[x] == it.blobs[y]
+                _ -> reflectedEquals(it, a, b)
+            }
+        }
+        .slice(x) -> {
+            match b {
+                .slice(y) -> x == y || listsEqual(it, it.lists[x], it.lists[y])
                 _ -> reflectedEquals(it, a, b)
             }
         }
@@ -600,6 +611,12 @@ fn pyLess(_ it: bind Interp, _ a: Value, _ b: Value, _ symbol: String) -> Bool {
         .bytes(x, _) -> {
             match b {
                 .bytes(y, _) -> { return bytesLess(it.blobs[x], it.blobs[y]) }
+                _ -> {}
+            }
+        }
+        .slice(x) -> {
+            match b {
+                .slice(y) -> { return sequenceLess(it, it.lists[x], it.lists[y], symbol) }
                 _ -> {}
             }
         }
@@ -852,6 +869,18 @@ fn hashKey(_ it: bind Interp, _ v: Value) -> String {
             }
             "y" + Data(bytes: it.blobs[id]).hex
         }
+        .slice(id) -> {
+            var out = "S"
+            for item in it.lists[id] {
+                let k = hashKey(it, item)
+                if it.signal != .none {
+                    return ""
+                }
+                out += "{k.count}:" + k
+            }
+            out
+        }
+        .ellipsis -> "E"
         _ -> {
             it.throw("TypeError", "unhashable type: '{typeName(it, v)}'")
             ""
@@ -1468,7 +1497,178 @@ fn rangeLength(_ start: Int, _ stop: Int, _ step: Int) -> Int {
     0
 }
 
+// Whether slicing a value is its own business (lists, text, …): an object
+// of a class, or a dictionary, is given a `slice` to do as it likes with.
+fn takesSlices(_ o: Value) -> Bool {
+    match o {
+        .instance(_) -> false
+        .dict(_) -> false
+        .klass(_) -> false
+        .builtin(_) -> false
+        _ -> true
+    }
+}
+
+// A slice's bound as a whole number (nil for None, or when it can't be
+// one: then a TypeError is raised).
+fn sliceIndex(_ it: bind Interp, _ v: Value) -> Int? {
+    match v {
+        .int(i) -> { return i }
+        .bool(b) -> { return if b { 1 } else { 0 } }
+        .none -> { return nil }
+        .instance(id) -> {
+            let method = classAttr(it, it.instances[id].cls, "__index__")
+            if method != Value.absent {
+                let r = it.callValue(method, [v], [], [])
+                if it.signal != .none {
+                    return nil
+                }
+                match r {
+                    .int(i) -> { return i }
+                    _ -> {
+                        it.throw("TypeError", "__index__ returned non-int (type {typeName(it, r)})")
+                        return nil
+                    }
+                }
+            }
+        }
+        _ -> {}
+    }
+    it.throw("TypeError", "slice indices must be integers or None or have an __index__ method")
+    nil
+}
+
+// slice(…).
+fn makeSlice(_ it: bind Interp, _ args: [Value]) -> Value {
+    if args.isEmpty {
+        return it.throw("TypeError", "slice expected at least 1 argument, got 0")
+    }
+    if args.count > 3 {
+        return it.throw("TypeError", "slice expected at most 3 arguments, got {args.count}")
+    }
+    var parts: [Value] = [.none, .none, .none]
+    if args.count == 1 {
+        parts[1] = args[0]
+    } else {
+        for i in args.indices {
+            parts[i] = args[i]
+        }
+    }
+    it.lists.append(parts)
+    Value.slice(id: it.lists.count - 1)
+}
+
+// Where a slice starts and stops in `count` items and its step, as
+// `slice.indices` gives them. Nothing (with a ValueError) for a step of 0.
+fn sliceAdjust(_ it: bind Interp, _ count: Int, _ lower: Int?, _ upper: Int?, _ step: Int?) -> [Int] {
+    let by = step ?? 1
+    if by == 0 {
+        it.throw("ValueError", "slice step cannot be zero")
+        return []
+    }
+    // (Before the first item: 0 going up, -1 going down.)
+    let low = if by > 0 { 0 } else { -1 }
+    let high = if by > 0 { count } else { count - 1 }
+    var from = if by > 0 { 0 } else { count - 1 }
+    var to = if by > 0 { count } else { -1 }
+    if let l = lower {
+        if l < 0 {
+            from = if l < -count { low } else { l + count }
+        } else {
+            from = if l > high { high } else { l }
+        }
+    }
+    if let u = upper {
+        if u < 0 {
+            to = if u < -count { low } else { u + count }
+        } else {
+            to = if u > high { high } else { u }
+        }
+    }
+    [from, to, by]
+}
+
+// o[s], o[s] = v and del o[s], for a slice that's a value.
+fn sliceItem(_ it: bind Interp, _ o: Value, _ sid: Int, _ how: Int, _ v: Value) -> Value {
+    let parts = it.lists[sid]
+    let lo = sliceIndex(it, parts[0])
+    if it.signal != .none {
+        return Value.none
+    }
+    let hi = sliceIndex(it, parts[1])
+    if it.signal != .none {
+        return Value.none
+    }
+    let st = sliceIndex(it, parts[2])
+    if it.signal != .none {
+        return Value.none
+    }
+    if how == 0 {
+        return getSlice(it, o, lo, hi, st)
+    }
+    if how == 1 {
+        if typeName(it, o) == "list" && !isIterable(it, v) {
+            return it.throw("TypeError", "must assign iterable to extended slice")
+        }
+        setSlice(it, o, lo, hi, st, v)
+    } else {
+        deleteSlice(it, o, lo, hi, st)
+    }
+    Value.none
+}
+
+// A slice's own attributes and its `indices` method.
+fn sliceAttr(_ it: bind Interp, _ id: Int, _ name: String) -> Value {
+    match name {
+        "start" -> it.lists[id][0]
+        "stop" -> it.lists[id][1]
+        "step" -> it.lists[id][2]
+        _ -> Value.absent
+    }
+}
+
+fn sliceMethod(_ it: bind Interp, _ id: Int, _ name: String, _ args: [Value]) -> Value {
+    if name != "indices" {
+        return it.throw("AttributeError", "'slice' object has no attribute '{name}'")
+    }
+    if args.count != 1 {
+        return it.throw("TypeError", "slice.indices() takes exactly one argument ({args.count} given)")
+    }
+    if let count = intOf(args[0]) {
+        if count < 0 {
+            return it.throw("ValueError", "length should not be negative")
+        }
+        let parts = it.lists[id]
+        let lo = sliceIndex(it, parts[0])
+        if it.signal != .none {
+            return Value.none
+        }
+        let hi = sliceIndex(it, parts[1])
+        if it.signal != .none {
+            return Value.none
+        }
+        let st = sliceIndex(it, parts[2])
+        if it.signal != .none {
+            return Value.none
+        }
+        let adjusted = sliceAdjust(it, count, lo, hi, st)
+        if adjusted.isEmpty {
+            return Value.none
+        }
+        return it.newTuple([.int(i: adjusted[0]), .int(i: adjusted[1]), .int(i: adjusted[2])])
+    }
+    it.throw("TypeError", "'{typeName(it, args[0])}' object cannot be interpreted as an integer")
+}
+
 fn getItem(_ it: bind Interp, _ o: Value, _ index: Value) -> Value {
+    match index {
+        .slice(sid) -> {
+            if takesSlices(o) {
+                return sliceItem(it, o, sid, 0, Value.none)
+            }
+        }
+        _ -> {}
+    }
     match o {
         .list(id) -> {
             if let i = intOf(index) {
@@ -1633,18 +1833,27 @@ fn getSlice(_ it: bind Interp, _ o: Value, _ lower: Int?, _ upper: Int?, _ step:
             it.newBytes(out, mutable)
         }
         .range(start, stop, step0) -> {
-            let at = sliceIndices(it, rangeLength(start, stop, step0), lower, upper, step)
-            var out: [Value] = []
-            for i in at {
-                out.append(.int(i: start + i * step0))
+            // A part of a range is a range.
+            let adjusted = sliceAdjust(it, rangeLength(start, stop, step0), lower, upper, step)
+            if adjusted.isEmpty {
+                return Value.none
             }
-            it.newList(out)
+            Value.range(start: start + adjusted[0] * step0, stop: start + adjusted[1] * step0, step: step0 * adjusted[2])
         }
         _ -> it.throw("TypeError", "'{typeName(it, o)}' object is not subscriptable")
     }
 }
 
 fn setItem(_ it: bind Interp, _ o: Value, _ index: Value, _ v: Value) {
+    match index {
+        .slice(sid) -> {
+            if takesSlices(o) {
+                sliceItem(it, o, sid, 1, v)
+                return
+            }
+        }
+        _ -> {}
+    }
     match o {
         .list(id) -> {
             if let i = intOf(index) {
@@ -1707,17 +1916,6 @@ fn setSlice(_ it: bind Interp, _ o: Value, _ lower: Int?, _ upper: Int?, _ step:
                 it.lists[id] = out
                 return
             }
-            if replacement.isEmpty {
-                // (del xs[::2])
-                var out: [Value] = []
-                for i in 0..count {
-                    if !at.contains(i) {
-                        out.append(it.lists[id][i])
-                    }
-                }
-                it.lists[id] = out
-                return
-            }
             if replacement.count != at.count {
                 it.throw("ValueError", "attempt to assign sequence of size {replacement.count} to extended slice of size {at.count}")
                 return
@@ -1728,7 +1926,7 @@ fn setSlice(_ it: bind Interp, _ o: Value, _ lower: Int?, _ upper: Int?, _ step:
         }
         .bytes(id, mutable) -> bytesSetSlice(it, id, mutable, lower, upper, step, v, false)
         _ -> {
-            it.throw("TypeError", "'{typeName(it, o)}' object does not support slice assignment")
+            it.throw("TypeError", "'{typeName(it, o)}' object does not support item assignment")
         }
     }
 }
@@ -1762,6 +1960,15 @@ fn deleteSlice(_ it: bind Interp, _ o: Value, _ lower: Int?, _ upper: Int?, _ st
 }
 
 fn deleteItem(_ it: bind Interp, _ o: Value, _ index: Value) {
+    match index {
+        .slice(sid) -> {
+            if takesSlices(o) {
+                sliceItem(it, o, sid, 2, Value.none)
+                return
+            }
+        }
+        _ -> {}
+    }
     match o {
         .list(id) -> {
             if let i = intOf(index) {
@@ -1938,6 +2145,12 @@ fn getAttr(_ it: bind Interp, _ o: Value, _ name: String) -> Value {
                 return typeOf(it, o)
             }
             match o {
+                .slice(id) -> {
+                    let part = sliceAttr(it, id, name)
+                    if part != Value.absent {
+                        return part
+                    }
+                }
                 .file(id) -> {
                     if name == "name" {
                         return .str(s: it.files[id].path)
