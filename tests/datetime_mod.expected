@@ -1,0 +1,188 @@
+2 days, 3:04:05.000006 datetime.timedelta(days=2, seconds=11045, microseconds=6) 2 11045 6 183845.000006
+0:00:00 datetime.timedelta(0) True False True
+1 day, 0:00:00 -1 day, 0:00:00 -1 day, 23:59:59 datetime.timedelta(days=-1, seconds=86399) -1 day, 0:00:05
+14 days, 0:00:00 0:00:01.500000 1:30:00 1 day, 1:00:00 1 day, 0:00:00
+1 day, 12:00:00 0:30:00 0:00:01.250000 0:00:00.000001 0:00:00 0:00:00.000002
+1 day, 12:00:00.500000 3 days, 12:00:00 0:00:06 0:00:00.000500
+0:01:00 1 day, 0:00:02.000003 datetime.timedelta(days=1, seconds=2, microseconds=3) datetime.timedelta(days=5) datetime.timedelta(microseconds=7)
+2 days, 0:00:00 -1 day, 23:59:59.999999 1 day, 3:46:40
+6:30:00 3:30:00 -1 day, 20:30:00 -1 day, 19:00:00 5:00:00 3:30:00 10:00:00 10:00:00 7:30:00 1:30:00 2:30:00 1:15:00 0:42:51.428571
+3.3333333333333335 3 0:30:00 1:30:00 (3, datetime.timedelta(seconds=1800)) 18000.0 0:00:00.333333 0:00:03.333333
+True True True False True False 5:00:00 1:30:00 [datetime.timedelta(0), datetime.timedelta(seconds=5400), datetime.timedelta(seconds=18000)]
+8:00:00 False True True 1
+3:25:42.857142 3:00:00 0:00:00.000002 0:00:00.000004 0:00:00.000001
+-999999999 days, 0:00:00 999999999 days, 23:59:59.999999 0:00:00.000001 datetime.timedelta(days=999999999, seconds=86399, microseconds=999999) datetime.timedelta(days=-999999999)
+-1.0 8640000000000.0 86402.000003 1e-06
+1 day, 0:00:00 2 days, 0:00:00 -2 days, 1:00:00 4 days, 4:00:00 0:00:00.000010
+5:00:00 | datetime.timedelta(seconds=18000) | 5:00:00 | datetime.timedelta(seconds=18000) 5:00:00 [datetime.timedelta(seconds=18000)] (datetime.timedelta(seconds=5400),)
+td + int TypeError: unsupported operand type(s) for +: 'datetime.timedelta' and 'int'
+int + td TypeError: unsupported operand type(s) for +: 'int' and 'datetime.timedelta'
+td - int TypeError: unsupported operand type(s) for -: 'datetime.timedelta' and 'int'
+td < int TypeError: '<' not supported between instances of 'datetime.timedelta' and 'int'
+td >= str TypeError: '>=' not supported between instances of 'datetime.timedelta' and 'str'
+td * str TypeError: can't multiply sequence by non-int of type 'datetime.timedelta'
+td * td TypeError: unsupported operand type(s) for *: 'datetime.timedelta' and 'datetime.timedelta'
+td / 0 ZeroDivisionError: integer division or modulo by zero
+td // 0 ZeroDivisionError: integer division or modulo by zero
+td / zero td ZeroDivisionError: division by zero
+td // zero td ZeroDivisionError: integer division or modulo by zero
+td % zero td ZeroDivisionError: integer division or modulo by zero
+td too big OverflowError: days=1000000000; must have magnitude <= 999999999
+td too small OverflowError: days=-1000000000; must have magnitude <= 999999999
+td max + 1 OverflowError: days=1000000000; must have magnitude <= 999999999
+td text TypeError: unsupported type for timedelta days component: str
+td text seconds TypeError: unsupported type for timedelta seconds component: str
+2024-02-29 datetime.date(2024, 2, 29) 2024 2 29 2024-02-29 2024-02-29 Thu Feb 29 00:00:00 2024
+3 4 datetime.IsoCalendarDate(year=2024, week=9, weekday=4) (2024, 9, 4) 738945 2024-02-29
+2023-02-28 2024-03-29 2024-02-01 2024-02-29
+0001-01-01 9999-12-31 1 day, 0:00:00 datetime.date(1, 1, 1) datetime.date(9999, 12, 31) 1 3652059
+2021-12-04 0001-01-01 2000-01-01 9999-12-31
+2024-03-01 2023-12-31 2025-03-01 59 days, 0:00:00 -59 days, 0:00:00 2024-03-07
+2024-03-01 2024-02-28 2024-02-29 2024-02-29
+True True True True True False
+False True False [datetime.date(2023, 5, 1), datetime.date(2024, 1, 31), datetime.date(2024, 5, 1)] 2020-01-01
+True leap 2 True
+[2023, 52, 7] datetime.IsoCalendarDate(year=2020, week=53, weekday=7) datetime.IsoCalendarDate(year=2020, week=53, weekday=4) datetime.IsoCalendarDate(year=2026, week=1, weekday=4)
+2024 1 1 True
+2024-01-01 2020-12-31 2010-01-03 2022-01-02
+[28, 29, 28, 29, 28]
+['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+2024-02-29 29/02/24 Thursday, February 29, 2024 Thu Feb 29 day 060 of 2024, week 08/09
+00:00:00.000000 AM 12 100% 24  plain 2024-02-29 02/29/24 4 4 2024-W09 20
+29.02.2024 February 2024 060 2024-02-29 2024-02-29 2024-02-29
+(2000, 1, 1, 0, 0, 0, 5, 1) 365
+366 29 719162 3652058
+33 12360 1765 days, 17:08:34.285714 1067904000.0
+date 30 Feb ValueError: day is out of range for month
+date month 13 ValueError: month must be in 1..12
+date month 0 ValueError: month must be in 1..12
+date day 0 ValueError: day is out of range for month
+date day 32 ValueError: day is out of range for month
+date year 0 ValueError: year 0 is out of range
+date year 10000 ValueError: year 10000 is out of range
+date text TypeError: an integer is required (got type str)
+date float TypeError: integer argument expected, got float
+date + int TypeError: unsupported operand type(s) for +: 'datetime.date' and 'int'
+int + date TypeError: unsupported operand type(s) for +: 'int' and 'datetime.date'
+date - int TypeError: unsupported operand type(s) for -: 'datetime.date' and 'int'
+date + date TypeError: unsupported operand type(s) for +: 'datetime.date' and 'datetime.date'
+date < int TypeError: '<' not supported between instances of 'datetime.date' and 'int'
+date >= str TypeError: '>=' not supported between instances of 'datetime.date' and 'str'
+date < datetime TypeError: can't compare datetime.datetime to datetime.date
+date - datetime TypeError: unsupported operand type(s) for -: 'datetime.date' and 'datetime.datetime'
+date.max + 1 OverflowError: date value out of range
+date.min - 1 OverflowError: date value out of range
+fromordinal 0 ValueError: ordinal must be >= 1
+replace bad ValueError: day is out of range for month
+fromisoformat short ValueError: Invalid isoformat string: '2021-2-4'
+fromisoformat text ValueError: Invalid isoformat string: 'yesterday'
+fromisoformat slashes ValueError: Invalid isoformat string: '2021/12/04'
+fromisoformat month ValueError: month must be in 1..12
+fromisocalendar week ValueError: Invalid week: 53
+fromisocalendar day ValueError
+13:05:09.123456 datetime.time(13, 5, 9, 123456) 13 5 9 123456 None 13:05:09.123456 0
+00:00:00 datetime.time(0, 0) 07:00:00 datetime.time(7, 30) datetime.time(7, 30, 15) 00:00:00.000001 23:59:59
+00:00:00 23:59:59.999999 0:00:00.000001 True True True True
+01:05:09.123456 13:05:09 13:00:00.123456 13:05:09 13:05:09.123 13:05 13
+13:05:09 01:05 PM 12:05 AM 12 PM 123456 13.05 1900-01-01 001
+04:23:01 datetime.time(4, 23) 04:23:01.000384 datetime.time(4, 23, 1, 123000) 04:00:00
+datetime.time(4, 23, 1, tzinfo=datetime.timezone(datetime.timedelta(seconds=14400))) -1 day, 18:30:00 UTC
+12:00:00+00:00 datetime.time(12, 0, tzinfo=datetime.timezone.utc) 0:00:00 UTC None None
+True False False
+True 1 [datetime.time(1, 0), datetime.time(1, 30), datetime.time(3, 0)]
+time hour ValueError: hour must be in 0..23
+time minute ValueError: minute must be in 0..59
+time second ValueError: second must be in 0..59
+time microsecond ValueError: microsecond must be in 0..999999
+time negative ValueError: hour must be in 0..23
+time + td TypeError: unsupported operand type(s) for +: 'datetime.time' and 'datetime.timedelta'
+time < int TypeError: '<' not supported between instances of 'datetime.time' and 'int'
+time naive < aware TypeError: can't compare offset-naive and offset-aware times
+time timespec ValueError: Unknown timespec value
+time fromisoformat ValueError: Invalid isoformat string: '4:23'
+time fromisoformat 2 ValueError: second must be in 0..59
+2024-05-17 13:30:45.123456 datetime.datetime(2024, 5, 17, 13, 30, 45, 123456) 2024 5 17 13 30 45 123456 None 0
+2024-05-17 00:00:00 datetime.datetime(2024, 5, 17, 0, 0) datetime.datetime(2024, 5, 17, 1, 0) datetime.datetime(2024, 5, 17, 1, 2) datetime.datetime(2024, 5, 17, 1, 2, 3) datetime.datetime(2024, 5, 17, 0, 0, 0, 4)
+2024-05-17 13:30:45.123456 datetime.date(2024, 5, 17) datetime.time(13, 30, 45, 123456) 13:30:45.123456 4 5 datetime.IsoCalendarDate(year=2024, week=20, weekday=5) 739023 Fri May 17 13:30:45 2024
+2024-05-17T13:30:45.123456 2024-05-17 13:30:45.123456 2024-05-17_13:30:45 2024-05-17T13:30 2024-05-17T13 2024-05-17T13:30:45.123 2024-01-01T00:00:00.000000
+2000-05-17 13:30:45.123456 2024-05-17 00:00:00 2024-02-29 13:30:45.123456 2024-05-17 13:30:45.000001
+2024-01-02 03:04:05 2024-05-17 00:00:00 2024-01-02 03:00:00+00:00 2024-01-02 03:00:00
+0001-01-01 00:00:00 9999-12-31 23:59:59.999999 0:00:00.000001 datetime.datetime(1, 1, 1, 0, 0) datetime.datetime(9999, 12, 31, 23, 59, 59, 999999) 2021-07-29 00:00:00 True False
+2024-05-18 13:30:45.123456 2024-05-16 23:30:45.123456 2024-05-17 13:30:46 2024-05-17 13:29:59.123456 2023-05-17 13:30:44.999999
+137 days, 13:30:45.123456 -138 days, 10:29:14.876544 0:00:00 1715952645.123456 221 2024-05-17 14:30:45.123456
+True False True True True False
+False False False True [datetime.datetime(2023, 6, 1, 23, 0), datetime.datetime(2024, 1, 1, 0, 0), datetime.datetime(2024, 1, 1, 5, 0)] False
+True k 2
+2024-05-17 13:30:45 17 May 2024, 01:30 PM Friday 17 May 24 133045.123456 138|Fri|%|PM|01
+Fri May 17 13:30:45 2024 05/17/24 13:30:45 [][] 12:07AM  5 12PM
+20240517-1330 13:30 May 2024-05-17 13:30:45.123456 2024-05-17 13:30:45.123456 2024-05-17 13:30:45.123456|datetime.datetime(2024, 5, 17, 13, 30, 45, 123456)
+2011-11-04 00:00:00 2011-11-04 00:05:23 2011-11-04 00:05:23.283000 datetime.datetime(2011, 11, 4, 0, 5, 23, 283185)
+datetime.datetime(2011, 11, 4, 0, 5, 23, tzinfo=datetime.timezone(datetime.timedelta(seconds=14400))) 2011-11-04 00:05:23.283000+00:00 5 7
+True True True True
+(2024, 5, 17, 13, 30, 45, 4, 138) None None None
+datetime hour ValueError: hour must be in 0..23
+datetime minute ValueError: minute must be in 0..59
+datetime second ValueError: second must be in 0..59
+datetime microsecond ValueError: microsecond must be in 0..999999
+datetime day ValueError: day is out of range for month
+datetime text TypeError: an integer is required (got type str)
+datetime + int TypeError: unsupported operand type(s) for +: 'datetime.datetime' and 'int'
+datetime + datetime TypeError: unsupported operand type(s) for +: 'datetime.datetime' and 'datetime.datetime'
+datetime - int TypeError: unsupported operand type(s) for -: 'datetime.datetime' and 'int'
+datetime - date TypeError: unsupported operand type(s) for -: 'datetime.datetime' and 'datetime.date'
+datetime < date TypeError: can't compare datetime.datetime to datetime.date
+datetime < int TypeError: '<' not supported between instances of 'datetime.datetime' and 'int'
+datetime max + 1 OverflowError: date value out of range
+datetime min - 1 OverflowError: date value out of range
+datetime timespec ValueError: Unknown timespec value
+datetime fromisoformat ValueError: Invalid isoformat string: '2011-11-04T'
+datetime fromisoformat 2 ValueError: hour must be in 0..23
+datetime fromisoformat 3 ValueError: Invalid isoformat string: '11/04/2011'
+datetime replace ValueError: hour must be in 0..23
+combine TypeError: combine() argument 2 must be datetime.time, not int
+UTC datetime.timezone.utc UTC+02:00 datetime.timezone(datetime.timedelta(seconds=7200)) EST-ish datetime.timezone(datetime.timedelta(days=-1, seconds=66600), 'EST-ish') UTC datetime.timezone(datetime.timedelta(0), 'Zulu') UTC+00:00:01
+0:00:00 2:00:00 EST-ish UTC+02:00 UTC None UTC+05:45
+True True True True UTC-23:59 UTC+23:59
+2024-05-17 12:00:00+00:00 datetime.datetime(2024, 5, 17, 12, 0, tzinfo=datetime.timezone.utc) 2024-05-17T12:00:00+00:00 0:00:00 UTC True 2024-05-17 12:00 UTC +0000
+2024-05-17 14:00:00+02:00 2024-05-17 06:30:00-05:30 True True 14 6 17 0:00:00 2:00:00 EST-ish -0530 EST-ish
+2024-05-17 12:00:00 2024-05-17 12:00:00+02:00 False True True
+2023-12-31 22:30:00+00:00 7:30:00 UTC+02:00
+True 1 False True 12:00:00+00:00 12:00:00 2024-05-17
+2024-05-18 01:00:00+00:00 True 2024-05-16 12:00:00+00:00 0:00:00
+1970-01-01 00:00:00+00:00 2023-11-14 22:13:20+00:00 2023-11-14 22:13:20.500000+00:00 1969-12-31 23:59:59+00:00 1971-01-02 02:00:00+02:00
+1970-01-01 00:00:00 2009-02-13 23:31:30.123456 datetime.datetime(2000, 2, 29, 0, 0) 2001-09-08 20:16:40-05:30
+1715947200.0 0.0 946677600.5 -1.0
+1700000000.0 1000000000.25 86400.0 True
+1700000000.0 2023-11-14 22:13:20+00:00 0:00:00
+True None datetime date datetime datetime True True
+True True True
+naive < aware TypeError: can't compare offset-naive and offset-aware datetimes
+naive - aware TypeError: can't subtract offset-naive and offset-aware datetimes
+naive == aware False
+timezone 24h ValueError: offset must be a timedelta strictly between -timedelta(hours=24) and timedelta(hours=24), not datetime.timedelta(days=1).
+timezone -24h ValueError: offset must be a timedelta strictly between -timedelta(hours=24) and timedelta(hours=24), not datetime.timedelta(days=-1).
+timezone int TypeError: timezone() argument 1 must be datetime.timedelta, not int
+tzinfo int TypeError: tzinfo argument must be None or of a tzinfo subclass, not type 'int'
+2024-05-17 21:00:00+09:00 JST 9:00:00 True 2024-05-17 12:00:00+00:00 2024-05-17 21:00:00+09:00 21:00 JST+0900 0:00:00
+2024-05-17 00:00:00 2024-05-17 13:30:00 2024-05-17 13:30:45.123456
+2024-05-17 00:00:00 2024-05-17 00:00:00 2024-05-17 00:00:00 2024-05-17 00:00:00
+1900-01-01 13:05:00 1900-01-01 00:00:00 1900-01-01 12:30:00 1900-01-01 11:59:59 1900-01-01 07:00:00
+2024-02-29 00:00:00 2023-12-31 00:00:00 1999-01-01 00:00:00 2068-01-01 00:00:00 1969-01-01 00:00:00 1900-01-01 00:00:05.500000
+datetime.datetime(2024, 5, 17, 0, 0, tzinfo=datetime.timezone(datetime.timedelta(seconds=7200))) 2024-05-17 00:00:00-05:30 2024-05-17 00:00:00+00:00 1900-01-01 12:00:00
+2024-01-01 00:00:00 2024-05-01 00:00:00 2024-05-17 00:00:00 2024-03-04 00:00:00 2003-02-01 00:00:00
+2024-05-17 13:30:45 2024-05-17 00:00:00 1900-01-01 13:30:45 True
+True 2024-05-17 13:30:45
+strptime no match ValueError: time data '17-05-2024' does not match format '%Y-%m-%d'
+strptime left over ValueError: unconverted data remains:  extra
+strptime bad directive ValueError: 'Q' is a bad directive in format '%Y %Q'
+strptime stray ValueError: stray % in format '%Y %'
+strptime day ValueError: day is out of range for month
+strptime month ValueError: time data '2023-13-01' does not match format '%Y-%m-%d'
+strptime word ValueError: time data 'Mai 2024' does not match format '%B %Y'
+strptime types TypeError: strptime() argument 1 must be str, not int
+['2024-01-29', '2024-02-05', '2024-02-12', '2024-02-19', '2024-02-26']
+23 [6, 13, 20, 27]
+['0:45:30', '16:14:30'] 17:00:00 17.0
+6 17 29 6 days, 17:29
+{'2024-01-01': [5, 20], '2024-02-01': [9]}
+[31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31] 1 9999 True True True

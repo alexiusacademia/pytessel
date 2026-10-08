@@ -1,8 +1,12 @@
 // `import`: the modules PyTessel has built in (math, random, time, sys, os,
-// json, functools, string), and other Python files next to the program.
+// json, string), the ones written in Python that it carries with it
+// (stdlib.tsl, made from lib/*.py), and other Python files next to the
+// program.
 
+// (`_re`, `_functools` and `_pytessel` are what the modules of lib/ are made
+// on: the regular expression engine, reduce, and what Python can't say.)
 fn builtinModules() -> [String] {
-    ["math", "random", "time", "sys", "os", "os.path", "json", "functools", "string", "typing"]
+    ["math", "random", "time", "sys", "os", "os.path", "json", "string", "typing", "_re", "_functools", "_pytessel"]
 }
 
 // What a built-in module has: its functions, then its other values.
@@ -12,12 +16,14 @@ fn moduleFunctions(_ m: String) -> [String] {
                    "asin", "acos", "atan", "atan2", "degrees", "radians", "hypot", "factorial", "gcd", "lcm", "isnan",
                    "isinf", "isfinite", "isqrt", "copysign", "fmod", "comb", "perm", "prod", "fsum", "dist", "isclose"]
         "random" -> ["random", "randint", "randrange", "choice", "shuffle", "uniform", "sample", "seed", "choices"]
-        "time" -> ["time", "sleep", "perf_counter", "monotonic", "process_time", "time_ns"]
+        "time" -> ["time", "sleep", "perf_counter", "monotonic", "process_time", "time_ns", "localtime", "gmtime", "mktime"]
         "sys" -> ["exit"]
         "os" -> ["getcwd", "listdir", "remove", "mkdir", "makedirs", "getenv"]
         "os.path" -> ["exists", "isfile", "isdir", "join", "basename", "dirname", "splitext", "abspath"]
         "json" -> ["dumps", "loads"]
-        "functools" -> ["reduce"]
+        "_functools" -> ["reduce"]
+        "_re" -> ["compile", "match", "scan", "text", "cut"]
+        "_pytessel" -> ["new_instance", "utc_offset"]
         _ -> []
     }
 }
@@ -112,11 +118,18 @@ fn importModule(_ it: bind Interp, _ name: String) -> Value {
     if it.modules.contains(key: name) {
         return .module(name: name)
     }
-    // A module given as text by the program around (embed.tsl), or a file
-    // next to the program: helpers.py for `import helpers`.
+    // A module given as text by the program around (embed.tsl), a file
+    // next to the program (helpers.py for `import helpers`), or one of the
+    // modules PyTessel carries with it (they're part of it: a sandbox has
+    // them too).
     var text = it.sources[name]
     if text == nil && !it.sandbox {
         text = readFile(path: joinPath(it.scriptDir, name.replace(".", with: "/") + ".py"))
+    }
+    var bundled = false
+    if text == nil {
+        text = bundledModule(name)
+        bundled = text != nil
     }
     if let source = text {
         parseInto(it.prog, source)
@@ -132,7 +145,16 @@ fn importModule(_ it: bind Interp, _ name: String) -> Value {
         let savedName = it.funcName
         it.env = e
         it.funcName = "<module>"
+        // Setting up one of PyTessel's own modules isn't the script's
+        // work: it doesn't count against the script's budget.
+        let savedBudget = it.budget
+        if bundled && savedBudget > 0 {
+            it.budget = -1
+        }
         it.execBlock(body)
+        if bundled && savedBudget > 0 && it.budget < 0 {
+            it.budget = savedBudget
+        }
         it.env = savedEnv
         it.funcName = savedName
         if it.signal != .none {
@@ -142,6 +164,21 @@ fn importModule(_ it: bind Interp, _ name: String) -> Value {
         return .module(name: name)
     }
     it.throw("ModuleNotFoundError", "No module named '{name}'")
+}
+
+// An exception's class as a traceback's last line names it: with its
+// module, for the classes of the bundled modules (they say which in
+// `__module__`): `re.error`, `statistics.StatisticsError`.
+fn exceptionKind(_ it: bind Interp, _ id: Int) -> String {
+    let cls = it.instances[id].cls
+    let name = it.classes[cls].name
+    if let home = it.classes[cls].attrs["__module__"] {
+        match home {
+            .str(s) -> { return s + "." + name }
+            _ -> {}
+        }
+    }
+    name
 }
 
 // from module import *
@@ -434,11 +471,79 @@ fn mathCall(_ it: bind Interp, _ name: String, _ args: [Value]) -> Value {
             if it.signal != .none {
                 return Value.none
             }
-            var total = 0.0
+            // The sum as if nothing were lost on the way: what each
+            // addition rounds off is kept, in `partials` (Shewchuk's way,
+            // as in CPython).
+            var partials: [Float] = []
+            // (Infinities and NaNs are added apart.)
+            var special = 0.0
+            var anySpecial = false
             for item in items {
-                total += floatOf(item) ?? 0.0
+                var x = 0.0
+                if let f = floatOf(item) {
+                    x = f
+                } else {
+                    return it.throw("TypeError", "must be real number, not {typeName(it, item)}")
+                }
+                if !x.isFinite {
+                    special += x
+                    anySpecial = true
+                    continue
+                }
+                var kept = 0
+                for p in partials {
+                    var y = p
+                    if abs(x) < abs(y) {
+                        let swap = x
+                        x = y
+                        y = swap
+                    }
+                    let hi = x + y
+                    if !hi.isFinite {
+                        return it.throw("OverflowError", "intermediate overflow in fsum")
+                    }
+                    let lo = y - (hi - x)
+                    if lo != 0.0 {
+                        partials[kept] = lo
+                        kept += 1
+                    }
+                    x = hi
+                }
+                partials = partials.prefix(kept)
+                partials.append(x)
             }
-            Value.float(f: total)
+            if anySpecial {
+                if special.isNaN && !items.any(where: { v in (floatOf(v) ?? 0.0).isNaN }) {
+                    return it.throw("ValueError", "-inf + inf in fsum")
+                }
+                return .float(f: special)
+            }
+            var n = partials.count
+            var hi = 0.0
+            if n > 0 {
+                n -= 1
+                hi = partials[n]
+                var lo = 0.0
+                while n > 0 {
+                    let x = hi
+                    n -= 1
+                    let y = partials[n]
+                    hi = x + y
+                    lo = y - (hi - x)
+                    if lo != 0.0 {
+                        break
+                    }
+                }
+                // (Halfway between two floats: the rest says which way.)
+                if n > 0 && ((lo < 0.0 && partials[n - 1] < 0.0) || (lo > 0.0 && partials[n - 1] > 0.0)) {
+                    let y = lo * 2.0
+                    let x = hi + y
+                    if y == x - hi {
+                        hi = x
+                    }
+                }
+            }
+            Value.float(f: hi)
         }
         "isclose" -> {
             let a = numberArg(it, args, 0)
@@ -643,6 +748,39 @@ fn moduleCall(_ it: bind Interp, _ m: String, _ name: String, _ args: [Value], _
                 "time" -> .float(f: now())
                 "perf_counter", "monotonic", "process_time" -> .float(f: now())
                 "time_ns" -> .int(i: Int(now() * 1000000000.0))
+                "localtime", "gmtime" -> {
+                    let t = if args.isEmpty || args[0] == Value.none { now() } else { numberArg(it, args, 0) }
+                    if it.signal != .none {
+                        return Value.none
+                    }
+                    if t.isNaN || t > 2.5e11 || t < -6.3e10 {
+                        return it.throw("OverflowError", "timestamp out of range for platform time_t")
+                    }
+                    let d = dateParts(floor(t), timeZone: if name == "gmtime" { "UTC" } else { "" })
+                    // (A plain tuple, in the order of Python's struct_time.)
+                    it.newTuple([.int(i: d.year), .int(i: d.month), .int(i: d.day), .int(i: d.hour), .int(i: d.minute),
+                                 Value.int(i: d.second), .int(i: d.weekday - 1), .int(i: d.dayOfYear),
+                                 Value.int(i: if name == "gmtime" { 0 } else { -1 })])
+                }
+                "mktime" -> {
+                    // The time of a date of the computer's time zone:
+                    // (year, month, day, hour, minute, second, …).
+                    let parts = iterate(it, args.first ?? Value.none)
+                    if it.signal != .none {
+                        return Value.none
+                    }
+                    if parts.count < 6 {
+                        return it.throw("TypeError", "mktime(): illegal time tuple argument")
+                    }
+                    var n: [Int] = []
+                    for i in 0..6 {
+                        n.append(wholeArg(it, parts, i))
+                    }
+                    if it.signal != .none {
+                        return Value.none
+                    }
+                    Value.float(f: date(year: n[0], month: n[1], day: n[2], hour: n[3], minute: n[4], second: n[5]))
+                }
                 "sleep" -> {
                     let until = now() + numberArg(it, args, 0)
                     while now() < until {
@@ -719,7 +857,43 @@ fn moduleCall(_ it: bind Interp, _ m: String, _ name: String, _ args: [Value], _
                 _ -> it.throw("AttributeError", "module 'os' has no attribute '{name}'")
             }
         }
-        "functools" -> {
+        "_re" -> rxCall(it, name, args)
+        "_pytessel" -> {
+            if name == "new_instance" {
+                // An object of a class, without calling __init__ (for copy).
+                match args.first ?? Value.none {
+                    .klass(cls) -> {
+                        it.instances.append(Instance(cls: cls))
+                        return .instance(id: it.instances.count - 1)
+                    }
+                    _ -> { return it.throw("TypeError", "new_instance() needs a class") }
+                }
+            }
+            if name == "utc_offset" {
+                // How many seconds the computer's time zone is ahead of
+                // UTC at a time (for datetime).
+                let t = floor(numberArg(it, args, 0))
+                if it.signal != .none {
+                    return Value.none
+                }
+                if t.isNaN || t > 2.5e11 || t < -6.3e10 {
+                    return it.throw("OverflowError", "timestamp out of range for platform time_t")
+                }
+                let here = dateParts(t)
+                let utc = dateParts(t, timeZone: "UTC")
+                // (The two dates are the same day or next to each other.)
+                var days = here.day - utc.day
+                if here.year != utc.year {
+                    days = if here.year > utc.year { 1 } else { -1 }
+                } else if here.month != utc.month {
+                    days = if here.month > utc.month { 1 } else { -1 }
+                }
+                let seconds = (here.hour - utc.hour) * 3600 + (here.minute - utc.minute) * 60 + (here.second - utc.second)
+                return .int(i: days * 86400 + seconds)
+            }
+            it.throw("AttributeError", "module '_pytessel' has no attribute '{name}'")
+        }
+        "_functools" -> {
             if name == "reduce" {
                 if args.count < 2 {
                     return it.throw("TypeError", "reduce expected at least 2 arguments, got {args.count}")
@@ -744,7 +918,7 @@ fn moduleCall(_ it: bind Interp, _ m: String, _ name: String, _ args: [Value], _
                 }
                 return total
             }
-            it.throw("AttributeError", "module 'functools' has no attribute '{name}'")
+            it.throw("AttributeError", "module '_functools' has no attribute '{name}'")
         }
         _ -> it.throw("AttributeError", "module '{m}' has no attribute '{name}'")
     }

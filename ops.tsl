@@ -354,6 +354,9 @@ fn toRepr(_ it: bind Interp, _ v: Value) -> String {
         .klass(id) -> {
             if it.classIds[it.classes[id].name] == id {
                 "<class '{it.classes[id].name}'>"
+            } else if let home = it.classes[id].attrs["__module__"] {
+                // (A class that says what module it's of: collections.Counter.)
+                "<class '{toStr(it, home)}.{it.classes[id].name}'>"
             } else {
                 "<class '__main__.{it.classes[id].name}'>"
             }
@@ -846,6 +849,32 @@ fn dictUpdate(_ it: bind Interp, _ id: Int, _ other: Value) {
             }
         }
         _ -> {
+            // An object with keys() (a Counter, an OrderedDict): its
+            // keys, and what it has for each.
+            match other {
+                .instance(oid) -> {
+                    if classAttr(it, it.instances[oid].cls, "keys") != Value.absent {
+                        let listed = callMethod(it, other, "keys", [], [], [])
+                        if it.signal != .none {
+                            return
+                        }
+                        let keys = iterate(it, listed)
+                        for k in keys {
+                            if it.signal != .none {
+                                return
+                            }
+                            let v = getItem(it, other, k)
+                            let h = hashKey(it, k)
+                            if it.signal != .none {
+                                return
+                            }
+                            dictSet(it.dicts[id], k, h, v)
+                        }
+                        return
+                    }
+                }
+                _ -> {}
+            }
             let pairs = iterate(it, other)
             if it.signal != .none {
                 return
@@ -1293,6 +1322,12 @@ fn unaryOp(_ it: bind Interp, _ op: UnOp, _ v: Value) -> Value {
         .pos -> {
             match v {
                 .float(_) -> { return v }
+                .instance(id) -> {
+                    let method = classAttr(it, it.instances[id].cls, "__pos__")
+                    if method != Value.absent {
+                        return it.callValue(method, [v], [], [])
+                    }
+                }
                 _ -> {}
             }
             if let i = intOf(v) {
@@ -1775,7 +1810,16 @@ fn getAttr(_ it: bind Interp, _ o: Value, _ name: String) -> Value {
             noAttribute(it, o, name)
         }
         .function(id) -> {
-            if name == "__name__" {
+            // (What the program set on it: `f.__name__ = …`, `f.calls = 0`.)
+            if let d = it.funcAttrs[id] {
+                if let at = it.dicts[d].index["s" + name] {
+                    return it.dicts[d].vals[at]
+                }
+                if name == "__dict__" {
+                    return .dict(id: d)
+                }
+            }
+            if name == "__name__" || name == "__qualname__" {
                 return .str(s: it.closures[id].name)
             }
             if name == "__doc__" {
@@ -1907,6 +1951,15 @@ fn setAttr(_ it: bind Interp, _ o: Value, _ name: String, _ v: Value) {
             } else {
                 it.throw("AttributeError", "can't set attributes of built-in module '{m}'")
             }
+        }
+        .function(id) -> {
+            // A function's own attributes, kept in a dictionary of its own.
+            var d = it.funcAttrs[id] ?? -1
+            if d < 0 {
+                d = it.newDict()
+                it.funcAttrs[id] = d
+            }
+            dictSet(it.dicts[d], .str(s: name), "s" + name, v)
         }
         _ -> {
             it.throw("AttributeError", "'{typeName(it, o)}' object has no attribute '{name}'")
