@@ -15,6 +15,7 @@ fn hasMethod(_ type: String, _ name: String) -> Bool {
                   "intersection_update", "difference_update"].contains(name)
         "tuple" -> ["count", "index"].contains(name)
         "slice" -> name == "indices"
+        "type" -> ["__new__", "__call__", "__init__", "mro", "__subclasses__"].contains(name)
         "TextIOWrapper", "BufferedReader", "BufferedWriter" -> ["read", "readline", "readlines", "write", "writelines", "close", "flush"].contains(name)
         "int" -> ["bit_length", "is_integer", "conjugate", "to_bytes", "from_bytes"].contains(name)
         "bytes", "bytearray" -> {
@@ -916,6 +917,11 @@ fn typeMethod(_ it: bind Interp, _ type: String, _ name: String, _ args: [Value]
         }
         return .dict(id: id)
     }
+    if type == "object" || type == "type" {
+        if let result = objectMethod(it, type, name, args, kwNames, kwValues) {
+            return result
+        }
+    }
     if (type == "bytes" || type == "bytearray") && name == "fromhex" {
         return bytesFromHex(it, args, type == "bytearray")
     }
@@ -932,10 +938,17 @@ fn typeMethod(_ it: bind Interp, _ type: String, _ name: String, _ args: [Value]
 fn callMethod(_ it: bind Interp, _ receiver: Value, _ name: String, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
     match receiver {
         .instance(id) -> {
+            let cls = it.instances[id].cls
+            if !it.classes[cls].plain {
+                let f = getAttr(it, receiver, name)
+                if it.signal != .none {
+                    return Value.none
+                }
+                return it.callValue(f, args, kwNames, kwValues)
+            }
             if let own = it.instances[id].fields[name] {
                 return it.callValue(own, args, kwNames, kwValues)
             }
-            let cls = it.instances[id].cls
             let found = classAttr(it, cls, name)
             match found {
                 .function(fid) -> {
@@ -1003,6 +1016,14 @@ fn callMethod(_ it: bind Interp, _ receiver: Value, _ name: String, _ args: [Val
             if kind == 2 && name == "setter" && args.count == 1 {
                 // @x.setter: the property gets the function that sets it.
                 it.setters[cell] = args[0]
+                return receiver
+            }
+            if kind == 2 && name == "deleter" && args.count == 1 {
+                it.deleters[cell] = args[0]
+                return receiver
+            }
+            if kind == 2 && name == "getter" && args.count == 1 {
+                it.cells[cell] = args[0]
                 return receiver
             }
             it.throw("AttributeError", "'{typeName(it, receiver)}' object has no attribute '{name}'")

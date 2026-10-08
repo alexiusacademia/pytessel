@@ -13,6 +13,9 @@ enum Node {
     noneLit
     // `...`
     ellipsisLit
+    notImplementedLit
+    // name=value among a class statement's bases (`metaclass=M`).
+    classKeyword(name: String, value: Int)
     trueLit
     falseLit
     intLit(value: Int)

@@ -29,6 +29,7 @@ fn isIterable(_ it: bind Interp, _ v: Value) -> Bool {
         .set(_) -> true
         .range(_, _, _) -> true
         .bytes(_, _) -> true
+        .klass(id) -> metaMethod(it, id, "__iter__") != Value.absent
         .iterator(_) -> true
         .file(_) -> true
         .instance(id) -> {
@@ -55,6 +56,16 @@ fn getIter(_ it: bind Interp, _ v: Value) -> Value {
         .set(id) -> { return makeIter(it, PyIter(items: dictKeys(it.dicts[id]), kind: "set_iterator")) }
         .bytes(_, mutable) -> {
             return makeIter(it, PyIter(items: iterate(it, v), kind: if mutable { "bytearray_iterator" } else { "bytes_iterator" }))
+        }
+        .klass(id) -> {
+            let method = metaMethod(it, id, "__iter__")
+            if method != Value.absent {
+                let made = it.callValue(method, [v], [], [])
+                if it.signal != .none {
+                    return Value.none
+                }
+                return getIter(it, made)
+            }
         }
         .instance(id) -> {
             let cls = it.instances[id].cls

@@ -1,0 +1,37 @@
+Made 3 Made with 3 True True True
+Child with 5 extra True True True True
+<class 'int'> <class 'str'> NoneType <class 'type'> type True
+TypeError: type() takes 1 or 3 arguments
+TypeError: type.__new__() argument 2 must be tuple, not list
+TypeError: type.__new__() argument 1 must be str, not int
+True False True False True
+['Base', 'Derived', 'Mixed'] base derived 0 1 2
+hello from base hello from derived True True True True
+True True False True True
+Meta True True True
+['circle', 'square'] Square(4) Circle(1) <plugin class Shape> <plugin class Square> [<plugin class Circle>] <plugin class Square>
+2 [<plugin class Circle>, <plugin class Square>] True False <plugin class Circle> ['Circle', 'Square']
+AttributeError: 'Square' object has no attribute 'create'
+AttributeError: 'Square' object has no attribute 'kinds'
+KeyError: 'hexagon'
+Config made: first
+True first True False 2
+6 (1, 2, 3) 0 () 2
+[('strict', True), ('table', 'users')] {}
+NameError: Bad.doThing: use lower_case names
+11 LOUD False False
+Color.RED <Color.GREEN: 2> BLUE 3 [<Color.RED: 1>, <Color.GREEN: 2>, <Color.BLUE: 3>] 3
+Color.GREEN Color.BLUE True True True True False
+True False True True True
+['Weekday.MON', 'Weekday.TUE'] Weekday.TUE g
+ValueError: 9 is not a valid Color
+KeyError: 'PINK'
+stop go ?
+Rex says woof on 4 legs Tweety says ... on 2 legs
+TypeError: Can't instantiate abstract class Animal without an implementation for abstract methods 'legs', 'sound'
+TypeError: Can't instantiate abstract class Half without an implementation for abstract method 'legs'
+True True True ABCMeta ['legs', 'sound'] ['legs'] []
+TypeError: Can't instantiate abstract class Sized without an implementation for abstract methods 'make', 'size', 'unit'
+3 cm
+TypeError: Can't instantiate abstract class OnlyOne without an implementation for abstract method 'run'
+ran

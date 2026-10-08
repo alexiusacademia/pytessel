@@ -83,6 +83,7 @@ fn typeName(_ it: bind Interp, _ v: Value) -> String {
         .bytes(_, mutable) -> bytesTypeName(mutable)
         .slice(_) -> "slice"
         .ellipsis -> "ellipsis"
+        .notImplemented -> "NotImplementedType"
         .wrapper(kind, _) -> if kind == 0 { "staticmethod" } else if kind == 1 { "classmethod" } else { "property" }
         .superRef(_, _) -> "super"
         .absent -> "?"
@@ -175,11 +176,15 @@ fn makeClass(_ it: bind Interp, _ name: String, _ bases: [Int], _ attrs: [String
             _ -> {}
         }
     }
+    finishClass(it, id)
     id
 }
 
 // A new object of a class: `Point(1, 2)`.
 fn instantiate(_ it: bind Interp, _ cls: Int, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
+    if it.classes[cls].custom {
+        return customInstantiate(it, cls, args, kwNames, kwValues)
+    }
     it.instances.append(Instance(cls: cls))
     let id = it.instances.count - 1
     let object = Value.instance(id: id)
@@ -215,9 +220,21 @@ fn bindAttr(_ it: bind Interp, _ found: Value, _ receiver: Value, _ cls: Int) ->
                 it.cells[cell]
             } else if kind == 1 {
                 it.newBound(.klass(id: cls), it.cells[cell])
+            } else if kind == 3 {
+                // (An abstract method: what it's around.)
+                bindAttr(it, it.cells[cell], receiver, cls)
             } else {
                 it.callValue(it.cells[cell], [receiver], [], [])
             }
+        }
+        .instance(d) -> {
+            // A descriptor gives what its `__get__` says.
+            let getter = classAttr(it, it.instances[d].cls, "__get__")
+            if getter != Value.absent {
+                let owner = Value.klass(id: cls)
+                return it.callValue(getter, [found, if receiver == owner { Value.none } else { receiver }, owner], [], [])
+            }
+            found
         }
         _ -> found
     }
@@ -280,6 +297,17 @@ fn exceptionText(_ it: bind Interp, _ id: Int) -> String {
 fn toStr(_ it: bind Interp, _ v: Value) -> String {
     match v {
         .str(s) -> s
+        .klass(id) -> {
+            let own = metaMethod(it, id, "__str__")
+            if own != Value.absent {
+                let r = it.callValue(own, [v], [], [])
+                match r {
+                    .str(s) -> { return s }
+                    _ -> { return "" }
+                }
+            }
+            toRepr(it, v)
+        }
         .instance(id) -> {
             let cls = it.instances[id].cls
             let method = classAttr(it, cls, "__str__")
@@ -365,6 +393,14 @@ fn toRepr(_ it: bind Interp, _ v: Value) -> String {
             }
         }
         .klass(id) -> {
+            let own = metaMethod(it, id, "__repr__")
+            if own != Value.absent {
+                let r = it.callValue(own, [v], [], [])
+                match r {
+                    .str(s) -> { return s }
+                    _ -> { return "" }
+                }
+            }
             if it.classIds[it.classes[id].name] == id {
                 "<class '{it.classes[id].name}'>"
             } else if let home = it.classes[id].attrs["__module__"] {
@@ -427,6 +463,7 @@ fn toRepr(_ it: bind Interp, _ v: Value) -> String {
         .bytes(id, mutable) -> if mutable { "bytearray(" + bytesRepr(it.blobs[id]) + ")" } else { bytesRepr(it.blobs[id]) }
         .slice(id) -> "slice(" + joinReprs(it, it.lists[id]) + ")"
         .ellipsis -> "Ellipsis"
+        .notImplemented -> "NotImplemented"
         .wrapper(kind, _) -> if kind == 0 { "<staticmethod object>" } else if kind == 1 { "<classmethod object>" } else { "<property object>" }
         .superRef(_, _) -> "<super object>"
         .absent -> "<absent>"
@@ -509,6 +546,9 @@ fn pyEquals(_ it: bind Interp, _ a: Value, _ b: Value) -> Bool {
                 if it.signal != .none {
                     return false
                 }
+                if r == Value.notImplemented {
+                    return reflectedEquals(it, a, b) || a == b
+                }
                 return truthy(it, r)
             }
             a == b
@@ -525,6 +565,9 @@ fn reflectedEquals(_ it: bind Interp, _ a: Value, _ b: Value) -> Bool {
             if method != Value.absent {
                 let r = it.callValue(method, [b, a], [], [])
                 if it.signal != .none {
+                    return false
+                }
+                if r == Value.notImplemented {
                     return false
                 }
                 return truthy(it, r)
@@ -630,7 +673,9 @@ fn pyLess(_ it: bind Interp, _ a: Value, _ b: Value, _ symbol: String) -> Bool {
                 if it.signal != .none {
                     return false
                 }
-                return truthy(it, r)
+                if r != Value.notImplemented {
+                    return truthy(it, r)
+                }
             }
         }
         _ -> {}
@@ -643,7 +688,9 @@ fn pyLess(_ it: bind Interp, _ a: Value, _ b: Value, _ symbol: String) -> Bool {
                 if it.signal != .none {
                     return false
                 }
-                return truthy(it, r)
+                if r != Value.notImplemented {
+                    return truthy(it, r)
+                }
             }
         }
         _ -> {}
@@ -686,9 +733,19 @@ fn richCompare(_ it: bind Interp, _ a: Value, _ b: Value, _ method: String) -> I
             if it.signal != .none {
                 return 0
             }
+            if r == Value.notImplemented {
+                return -1
+            }
             if truthy(it, r) { 1 } else { 0 }
         }
         _ -> -1
+    }
+}
+
+fn isObject(_ v: Value) -> Bool {
+    match v {
+        .instance(_) -> true
+        _ -> false
     }
 }
 
@@ -717,6 +774,19 @@ fn compareOp(_ it: bind Interp, _ op: CmpOp, _ a: Value, _ b: Value) -> Bool {
             if own >= 0 {
                 return own == 1
             }
+            if it.signal != .none {
+                return false
+            }
+            let other = richCompare(it, b, a, "__ge__")
+            if other >= 0 {
+                return other == 1
+            }
+            if it.signal != .none {
+                return false
+            }
+            if isObject(a) || isObject(b) {
+                return orderError(it, "<=", a, b)
+            }
             if pyLess(it, a, b, "<=") {
                 return true
             }
@@ -729,6 +799,19 @@ fn compareOp(_ it: bind Interp, _ op: CmpOp, _ a: Value, _ b: Value) -> Bool {
             let own = richCompare(it, a, b, "__ge__")
             if own >= 0 {
                 return own == 1
+            }
+            if it.signal != .none {
+                return false
+            }
+            let other = richCompare(it, b, a, "__le__")
+            if other >= 0 {
+                return other == 1
+            }
+            if it.signal != .none {
+                return false
+            }
+            if isObject(a) || isObject(b) {
+                return orderError(it, ">=", a, b)
             }
             if pyLess(it, b, a, ">=") {
                 return true
@@ -763,6 +846,22 @@ fn contains(_ it: bind Interp, _ container: Value, _ item: Value) -> Bool {
         .list(id) -> listContains(it, it.lists[id], item)
         .tuple(id) -> listContains(it, it.lists[id], item)
         .bytes(id, _) -> bytesContains(it, id, item)
+        .klass(id) -> {
+            // (A class whose metaclass says what's in it: an Enum.)
+            let method = metaMethod(it, id, "__contains__")
+            if method != Value.absent {
+                let r = it.callValue(method, [container, item], [], [])
+                if it.signal != .none {
+                    return false
+                }
+                return truthy(it, r)
+            }
+            if !isIterable(it, container) {
+                it.throw("TypeError", "argument of type 'type' is not iterable")
+                return false
+            }
+            iterContains(it, container, item)
+        }
         .dict(id) -> {
             let h = hashKey(it, item)
             if it.signal != .none {
@@ -851,9 +950,23 @@ fn hashKey(_ it: bind Interp, _ v: Value) -> String {
         .instance(id) -> {
             let method = classAttr(it, it.instances[id].cls, "__hash__")
             if method != Value.absent {
+                if method == Value.none {
+                    it.throw("TypeError", "unhashable type: '{typeName(it, v)}'")
+                    return ""
+                }
                 let r = it.callValue(method, [v], [], [])
                 if it.signal != .none {
                     return ""
+                }
+                // (The hash of a built-in value, like hash(tuple(self)):
+                // the object is the same key as that value.)
+                match r {
+                    .int(h) -> {
+                        if let text = it.hashTexts[h] {
+                            return text
+                        }
+                    }
+                    _ -> {}
                 }
                 return "h" + toRepr(it, r)
             }
@@ -1306,7 +1419,10 @@ fn binaryOp(_ it: bind Interp, _ op: BinOp, _ a: Value, _ b: Value) -> Value {
         .instance(id) -> {
             let method = classAttr(it, it.instances[id].cls, "__" + opMethod(op) + "__")
             if method != Value.absent {
-                return it.callValue(method, [a, b], [], [])
+                let r = it.callValue(method, [a, b], [], [])
+                if r != Value.notImplemented || it.signal != .none {
+                    return r
+                }
             }
         }
         _ -> {}
@@ -1327,10 +1443,19 @@ fn binaryOp(_ it: bind Interp, _ op: BinOp, _ a: Value, _ b: Value) -> Value {
         .instance(id) -> {
             let method = classAttr(it, it.instances[id].cls, "__r" + opMethod(op) + "__")
             if method != Value.absent {
-                return it.callValue(method, [b, a], [], [])
+                let r = it.callValue(method, [b, a], [], [])
+                if r != Value.notImplemented || it.signal != .none {
+                    return r
+                }
             }
         }
         _ -> {}
+    }
+    if op == .add {
+        let left = typeName(it, a)
+        if left == "str" || left == "list" || left == "tuple" {
+            return it.throw("TypeError", "can only concatenate {left} (not \"{typeName(it, b)}\") to {left}")
+        }
     }
     it.throw("TypeError", "unsupported operand type(s) for {opSymbol(op)}: '{typeName(it, a)}' and '{typeName(it, b)}'")
 }
@@ -1373,7 +1498,10 @@ fn inPlaceOp(_ it: bind Interp, _ op: BinOp, _ a: Value, _ b: Value) -> Value {
         .instance(id) -> {
             let method = classAttr(it, it.instances[id].cls, "__i" + opMethod(op) + "__")
             if method != Value.absent {
-                return it.callValue(method, [a, b], [], [])
+                let r = it.callValue(method, [a, b], [], [])
+                if r != Value.notImplemented || it.signal != .none {
+                    return r
+                }
             }
         }
         _ -> {}
@@ -1496,7 +1624,7 @@ fn iterate(_ it: bind Interp, _ v: Value) -> [Value] {
             it.files[id].pos = it.files[id].lines.count
             out
         }
-        .instance(_) -> {
+        .instance(_), .klass(_) -> {
             let iterator = getIter(it, v)
             if it.signal != .none {
                 return []
@@ -1762,7 +1890,7 @@ fn getItem(_ it: bind Interp, _ o: Value, _ index: Value) -> Value {
         }
         // list[int] and the like, in annotations: the type itself.
         .builtin(_) -> o
-        .klass(_) -> o
+        .klass(id) -> classGetItem(it, o, id, index)
         _ -> it.throw("TypeError", "'{typeName(it, o)}' object is not subscriptable")
     }
 }
@@ -2053,10 +2181,13 @@ fn noAttribute(_ it: bind Interp, _ o: Value, _ name: String) -> Value {
 fn getAttr(_ it: bind Interp, _ o: Value, _ name: String) -> Value {
     match o {
         .instance(id) -> {
+            let cls = it.instances[id].cls
+            if !it.classes[cls].plain {
+                return objectGet(it, o, id, name, true)
+            }
             if let v = it.instances[id].fields[name] {
                 return v
             }
-            let cls = it.instances[id].cls
             let found = classAttr(it, cls, name)
             if found != Value.absent {
                 return bindAttr(it, found, o, cls)
@@ -2092,12 +2223,20 @@ fn getAttr(_ it: bind Interp, _ o: Value, _ name: String) -> Value {
                     if kind == 1 {
                         return it.newBound(o, it.cells[cell])
                     }
+                    if kind == 3 {
+                        return it.cells[cell]
+                    }
                     return found
                 }
+                .instance(_) -> { return bindAttr(it, found, o, id) }
                 _ -> { return found }
             }
             if name == "__name__" {
                 return .str(s: it.classes[id].name)
+            }
+            let general = classLevelAttr(it, o, id, name)
+            if general != Value.absent || it.signal != .none {
+                return general
             }
             noAttribute(it, o, name)
         }
@@ -2125,6 +2264,16 @@ fn getAttr(_ it: bind Interp, _ o: Value, _ name: String) -> Value {
                             return it.newBound(receiver, .builtin(name: "@exception_init"))
                         }
                         return .builtin(name: "@noop")
+                    }
+                    let basic = objectFallback(it, receiver, name)
+                    if basic != Value.absent {
+                        return basic
+                    }
+                }
+                .klass(k) -> {
+                    let v = superClassAttr(it, receiver, k, cls, name)
+                    if v != Value.absent || it.signal != .none {
+                        return v
                     }
                 }
                 _ -> {}
@@ -2160,8 +2309,20 @@ fn getAttr(_ it: bind Interp, _ o: Value, _ name: String) -> Value {
             noAttribute(it, o, name)
         }
         .wrapper(kind, cell) -> {
-            if kind == 2 && name == "setter" {
-                return it.newBound(o, .builtin(name: "@setter"))
+            if kind == 2 && (name == "setter" || name == "deleter" || name == "getter") {
+                return it.newBound(o, .builtin(name: "@" + name))
+            }
+            if kind == 2 && name == "fget" {
+                return it.cells[cell]
+            }
+            if kind == 2 && name == "fset" {
+                return it.setters[cell] ?? Value.none
+            }
+            if kind == 2 && name == "fdel" {
+                return it.deleters[cell] ?? Value.none
+            }
+            if name == "__isabstractmethod__" {
+                return .bool(b: isAbstract(it, o))
             }
             if name == "__func__" {
                 return it.cells[cell]
@@ -2236,6 +2397,7 @@ fn getAttr(_ it: bind Interp, _ o: Value, _ name: String) -> Value {
 fn typeOf(_ it: bind Interp, _ v: Value) -> Value {
     match v {
         .instance(id) -> .klass(id: it.instances[id].cls)
+        .klass(id) -> if it.classes[id].meta >= 0 { .klass(id: it.classes[id].meta) } else { .builtin(name: "type") }
         _ -> .builtin(name: typeName(it, v))
     }
 }
@@ -2244,8 +2406,12 @@ fn setAttr(_ it: bind Interp, _ o: Value, _ name: String, _ v: Value) {
     match o {
         .instance(id) -> {
             let cls = it.instances[id].cls
+            if !it.classes[cls].plain {
+                objectSet(it, o, id, name, v, true)
+                return
+            }
             // A property with a setter takes the value.
-            if !it.setters.isEmpty {
+            if !it.setters.isEmpty || !it.deleters.isEmpty {
                 match classAttr(it, cls, name) {
                     .wrapper(kind, cell) -> {
                         if kind == 2 {
@@ -2263,6 +2429,13 @@ fn setAttr(_ it: bind Interp, _ o: Value, _ name: String, _ v: Value) {
             it.instances[id].fields[name] = v
         }
         .klass(id) -> {
+            let viaMeta = metaMethod(it, id, "__setattr__")
+            if viaMeta != Value.absent && !it.settingClass {
+                it.settingClass = true
+                it.callValue(viaMeta, [o, .str(s: name), v], [], [])
+                it.settingClass = false
+                return
+            }
             it.classes[id].attrs[name] = v
             match v {
                 .function(fid) -> {
@@ -2271,6 +2444,9 @@ fn setAttr(_ it: bind Interp, _ o: Value, _ name: String, _ v: Value) {
                     }
                 }
                 _ -> {}
+            }
+            if name.hasPrefix("__") || isObject(v) || !it.classes[id].abstracts.isEmpty {
+                classChanged(it, id)
             }
         }
         .module(m) -> {
@@ -2298,6 +2474,11 @@ fn setAttr(_ it: bind Interp, _ o: Value, _ name: String, _ v: Value) {
 fn deleteAttr(_ it: bind Interp, _ o: Value, _ name: String) {
     match o {
         .instance(id) -> {
+            let cls = it.instances[id].cls
+            if !it.classes[cls].plain || !it.deleters.isEmpty {
+                objectDelete(it, o, id, name, true)
+                return
+            }
             if it.instances[id].fields.removeValue(forKey: name) == nil {
                 noAttribute(it, o, name)
             }
@@ -2305,6 +2486,8 @@ fn deleteAttr(_ it: bind Interp, _ o: Value, _ name: String) {
         .klass(id) -> {
             if it.classes[id].attrs.removeValue(forKey: name) == nil {
                 noAttribute(it, o, name)
+            } else if name.hasPrefix("__") {
+                classChanged(it, id)
             }
         }
         _ -> {

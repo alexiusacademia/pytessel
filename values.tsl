@@ -34,6 +34,8 @@ enum Value {
     slice(id: Int)
     // `...`
     ellipsis
+    // What a special method gives back to say "not for me to do".
+    notImplemented
     // staticmethod (0), classmethod (1) and property (2) around `cells[id]`.
     wrapper(kind: Int, id: Int)
     // super(): the object (`cells[cell]`) seen as the classes after `cls`.
@@ -163,6 +165,23 @@ struct Klass {
     // are looked for.
     mro: [Int] = []
     attrs: [String: Value] = [:]
+    // What `finishClass` (objects.tsl) works out. `plain`: getting and
+    // setting its objects' attributes needs nothing special (no data
+    // descriptors, `__slots__`, `__getattribute__`, `__setattr__`,
+    // `__delattr__`). `custom`: making its objects does (`__new__`,
+    // abstract methods, a metaclass, or it's a metaclass itself).
+    plain: Bool = true
+    custom: Bool = false
+    // Its objects have only the attributes `slotNames` lists.
+    slots: Bool = false
+    slotNames: [String] = []
+    hasNew: Bool = false
+    // It inherits from `type`: its objects are classes.
+    isMeta: Bool = false
+    // The abstract methods nothing has filled in yet.
+    abstracts: [String] = []
+    // Its metaclass (-1 for `type`).
+    meta: Int = -1
 }
 
 struct Instance {

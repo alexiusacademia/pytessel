@@ -4,11 +4,14 @@
 // `import` runs them like a file's (see importModule in modules.tsl).
 
 fn bundledModules() -> [String] {
-    ["bisect", "collections", "copy", "datetime", "functools", "heapq", "itertools", "operator", "re", "statistics", "textwrap"]
+    ["abc", "bisect", "collections", "copy", "datetime", "functools", "heapq", "itertools", "operator", "re", "statistics", "textwrap"]
 }
 
 // A bundled module's Python text, or nil if there's none of that name.
 fn bundledModule(_ name: String) -> String? {
+    if name == "abc" {
+        return bundled_abc()
+    }
     if name == "bisect" {
         return bundled_bisect()
     }
@@ -43,6 +46,12 @@ fn bundledModule(_ name: String) -> String? {
         return bundled_textwrap()
     }
     nil
+}
+
+fn bundled_abc() -> String {
+    [
+        "\"\"\"abc: abstract base classes.\n\nA class whose metaclass is ABCMeta (or that inherits from ABC) can't be\ninstantiated while a method marked @abstractmethod is not filled in. The\ninterpreter itself keeps track of which are (objects.tsl); this module\nonly gives the names.\n\"\"\"\n\nabstractmethod = __abstractmethod__\n\n\nclass ABCMeta(type):\n    __module__ = \"abc\"\n\n\nclass ABC(metaclass=ABCMeta):\n    __module__ = \"abc\"\n",
+    ].joined()
 }
 
 fn bundled_bisect() -> String {

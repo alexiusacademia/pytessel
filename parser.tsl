@@ -547,11 +547,13 @@ struct Parser {
         var bases: [Int] = []
         if acceptOp("(") {
             while !isOp(")") && error == "" {
-                // (`metaclass=…` and the like are read and left out.)
+                // (`metaclass=…` and the like go with the bases, marked.)
                 if kind() == .name && nextIsOp("=") {
+                    let key = text()
+                    let keyLine = line()
                     advance()
                     advance()
-                    expression()
+                    bases.append(add(.classKeyword(name: key, value: expression()), keyLine))
                 } else {
                     bases.append(expression())
                 }
@@ -1706,6 +1708,9 @@ struct Parser {
             advance()
             if t == "Ellipsis" {
                 return add(.ellipsisLit, at)
+            }
+            if t == "NotImplemented" {
+                return add(.notImplementedLit, at)
             }
             let n = add(.name(id: t), at)
             noteRef(n)

@@ -1,0 +1,896 @@
+// Classes beyond the plain case: descriptors, `__slots__`, the hooks on
+// attribute access (`__getattribute__`, `__setattr__`, `__delattr__`),
+// `__new__`, `__init_subclass__`, abstract methods and metaclasses.
+//
+// A class with none of these is `plain` and not `custom` (see `Klass`), and
+// ops.tsl deals with it the short way; the rest comes here.
+
+// The class `type`, which metaclasses inherit from. (Made when first needed.)
+fn typeClass(_ it: bind Interp) -> Int {
+    if let id = it.classIds["type"] {
+        return id
+    }
+    let id = makeClass(it, "type", [it.classIds["object"] ?? 0], [:])
+    it.classIds["type"] = id
+    it.classes[id].isMeta = true
+    it.classes[id].custom = true
+    id
+}
+
+// Whether a class attribute is an abstract method (`@abstractmethod`,
+// alone or under `@property`, `@classmethod`, `@staticmethod`).
+fn isAbstract(_ it: bind Interp, _ v: Value) -> Bool {
+    match v {
+        .wrapper(kind, cell) -> {
+            if kind == 3 {
+                return true
+            }
+            isAbstract(it, it.cells[cell])
+        }
+        _ -> false
+    }
+}
+
+// Whether a value is a data descriptor: an object whose class has
+// `__set__` or `__delete__`.
+fn isDataDescriptor(_ it: bind Interp, _ v: Value) -> Bool {
+    match v {
+        .instance(d) -> {
+            let c = it.instances[d].cls
+            classAttr(it, c, "__set__") != Value.absent || classAttr(it, c, "__delete__") != Value.absent
+        }
+        _ -> false
+    }
+}
+
+// Works out what a class is like, from its own attributes and its bases:
+// called when the class is made, and again when its attributes change.
+fn finishClass(_ it: bind Interp, _ id: Int) {
+    let bases = it.classes[id].bases
+    let attrs = it.classes[id].attrs
+    let object = it.classIds["object"] ?? 0
+    var plain = true
+    var hasNew = attrs["__new__"] != nil
+    var isMeta = id == (it.classIds["type"] ?? -1)
+    var slotted = attrs["__slots__"] != nil
+    var slotNames: [String] = []
+    var candidates: [String] = []
+    for b in bases {
+        let base = it.classes[b]
+        if !base.plain {
+            plain = false
+        }
+        if base.hasNew {
+            hasNew = true
+        }
+        if base.isMeta {
+            isMeta = true
+        }
+        if b != object && !base.slots {
+            slotted = false
+        }
+        slotNames.appendAll(base.slotNames)
+        candidates.appendAll(base.abstracts)
+    }
+    for (key, v) in attrs {
+        if key == "__getattribute__" || key == "__setattr__" || key == "__delattr__" || key == "__slots__" {
+            plain = false
+        }
+        match v {
+            .instance(_) -> {
+                if isDataDescriptor(it, v) {
+                    plain = false
+                }
+            }
+            .wrapper(_, _) -> {
+                if isAbstract(it, v) {
+                    candidates.append(key)
+                }
+            }
+            _ -> {}
+        }
+    }
+    if let named = attrs["__slots__"] {
+        match named {
+            .str(s) -> { slotNames.append(s) }
+            .tuple(t) -> {
+                for item in it.lists[t] {
+                    slotNames.append(toStr(it, item))
+                }
+            }
+            .list(t) -> {
+                for item in it.lists[t] {
+                    slotNames.append(toStr(it, item))
+                }
+            }
+            _ -> {}
+        }
+    }
+    var abstracts: [String] = []
+    for name in candidates.unique().sorted() {
+        if isAbstract(it, classAttr(it, id, name)) {
+            abstracts.append(name)
+        }
+    }
+    it.classes[id].plain = plain
+    it.classes[id].hasNew = hasNew
+    it.classes[id].isMeta = isMeta
+    it.classes[id].slots = slotted
+    it.classes[id].slotNames = slotNames
+    it.classes[id].abstracts = abstracts
+    it.classes[id].custom = isMeta || hasNew || !abstracts.isEmpty || it.classes[id].meta >= 0
+}
+
+// A class's attributes changed (`C.x = …`): it and its heirs are looked
+// over again.
+fn classChanged(_ it: bind Interp, _ id: Int) {
+    for c in it.classes.indices {
+        if c == id || it.classes[c].mro.contains(id) {
+            finishClass(it, c)
+        }
+    }
+}
+
+// A special method of a class's metaclass (`.absent` if it has none).
+fn metaMethod(_ it: bind Interp, _ id: Int, _ name: String) -> Value {
+    let meta = it.classes[id].meta
+    if meta < 0 {
+        return Value.absent
+    }
+    classAttr(it, meta, name)
+}
+
+// ---- attributes of objects whose class isn't plain ----
+
+// object.attribute, the long way. `hook` is false when it's
+// `object.__getattribute__` itself asking.
+fn objectGet(_ it: bind Interp, _ o: Value, _ id: Int, _ name: String, _ hook: Bool) -> Value {
+    let cls = it.instances[id].cls
+    if hook {
+        let own = classAttr(it, cls, "__getattribute__")
+        if own != Value.absent {
+            let r = it.callValue(own, [o, .str(s: name)], [], [])
+            if it.signal == .raising && exceptionMatches(it, it.exc, .klass(id: it.classIds["AttributeError"] ?? -1)) {
+                let fallback = classAttr(it, cls, "__getattr__")
+                if fallback != Value.absent {
+                    it.signal = .none
+                    it.exc = .none
+                    return it.callValue(fallback, [o, .str(s: name)], [], [])
+                }
+            }
+            return r
+        }
+    }
+    let found = classAttr(it, cls, name)
+    // What the class has comes before the object's own, if it's a data
+    // descriptor (or a property).
+    match found {
+        .instance(d) -> {
+            if isDataDescriptor(it, found) {
+                let getter = classAttr(it, it.instances[d].cls, "__get__")
+                if getter != Value.absent {
+                    return it.callValue(getter, [found, o, .klass(id: cls)], [], [])
+                }
+            }
+        }
+        .wrapper(kind, _) -> {
+            if kind == 2 {
+                return bindAttr(it, found, o, cls)
+            }
+        }
+        _ -> {}
+    }
+    if let v = it.instances[id].fields[name] {
+        return v
+    }
+    if found != Value.absent {
+        return bindAttr(it, found, o, cls)
+    }
+    if name == "__class__" {
+        return .klass(id: cls)
+    }
+    if name == "__dict__" && !it.classes[cls].slots {
+        let d = it.newDict()
+        let slotNames = it.classes[cls].slotNames
+        for (k, v) in it.instances[id].fields {
+            if slotNames.isEmpty || !slotNames.contains(k) {
+                dictSet(it.dicts[d], .str(s: k), "s" + k, v)
+            }
+        }
+        return .dict(id: d)
+    }
+    if hook {
+        let fallback = classAttr(it, cls, "__getattr__")
+        if fallback != Value.absent {
+            return it.callValue(fallback, [o, .str(s: name)], [], [])
+        }
+    }
+    if name == "value" && isSubclass(it, cls, it.classIds["StopIteration"] ?? -1) {
+        return stopValueOf(it, o)
+    }
+    noAttribute(it, o, name)
+}
+
+// object.attribute = v, the long way.
+fn objectSet(_ it: bind Interp, _ o: Value, _ id: Int, _ name: String, _ v: Value, _ hook: Bool) {
+    let cls = it.instances[id].cls
+    if hook {
+        let own = classAttr(it, cls, "__setattr__")
+        if own != Value.absent {
+            it.callValue(own, [o, .str(s: name), v], [], [])
+            return
+        }
+    }
+    let found = classAttr(it, cls, name)
+    match found {
+        .instance(d) -> {
+            let c = it.instances[d].cls
+            let setter = classAttr(it, c, "__set__")
+            if setter != Value.absent {
+                it.callValue(setter, [found, o, v], [], [])
+                return
+            }
+            if classAttr(it, c, "__delete__") != Value.absent {
+                it.throw("AttributeError", "__set__")
+                return
+            }
+        }
+        .wrapper(kind, cell) -> {
+            if kind == 2 {
+                if let setter = it.setters[cell] {
+                    it.callValue(setter, [o, v], [], [])
+                } else {
+                    it.throw("AttributeError", "property '{name}' of '{it.classes[cls].name}' object has no setter")
+                }
+                return
+            }
+        }
+        _ -> {}
+    }
+    if it.classes[cls].slots && !it.classes[cls].slotNames.contains(name) {
+        if found != Value.absent {
+            it.throw("AttributeError", "'{it.classes[cls].name}' object attribute '{name}' is read-only")
+        } else {
+            it.throw("AttributeError", "'{it.classes[cls].name}' object has no attribute '{name}'")
+        }
+        return
+    }
+    it.instances[id].fields[name] = v
+}
+
+// del object.attribute, the long way.
+fn objectDelete(_ it: bind Interp, _ o: Value, _ id: Int, _ name: String, _ hook: Bool) {
+    let cls = it.instances[id].cls
+    if hook {
+        let own = classAttr(it, cls, "__delattr__")
+        if own != Value.absent {
+            it.callValue(own, [o, .str(s: name)], [], [])
+            return
+        }
+    }
+    let found = classAttr(it, cls, name)
+    match found {
+        .instance(d) -> {
+            let c = it.instances[d].cls
+            let deleter = classAttr(it, c, "__delete__")
+            if deleter != Value.absent {
+                it.callValue(deleter, [found, o], [], [])
+                return
+            }
+            if classAttr(it, c, "__set__") != Value.absent {
+                it.throw("AttributeError", "__delete__")
+                return
+            }
+        }
+        .wrapper(kind, cell) -> {
+            if kind == 2 {
+                if let deleter = it.deleters[cell] {
+                    it.callValue(deleter, [o], [], [])
+                } else {
+                    it.throw("AttributeError", "property '{name}' of '{it.classes[cls].name}' object has no deleter")
+                }
+                return
+            }
+        }
+        _ -> {}
+    }
+    if it.instances[id].fields.removeValue(forKey: name) == nil {
+        noAttribute(it, o, name)
+    }
+}
+
+// ---- attributes of classes ----
+
+// What `Class.name` gives when no class it inherits from has it: what its
+// metaclass has, and what every class has.
+fn classLevelAttr(_ it: bind Interp, _ o: Value, _ id: Int, _ name: String) -> Value {
+    let meta = it.classes[id].meta
+    if meta >= 0 {
+        let found = classAttr(it, meta, name)
+        if found != Value.absent {
+            return bindAttr(it, found, o, meta)
+        }
+    }
+    match name {
+        "__mro__" -> {
+            var out: [Value] = []
+            for c in it.classes[id].mro {
+                out.append(.klass(id: c))
+            }
+            return it.newTuple(out)
+        }
+        "__bases__" -> {
+            var out: [Value] = []
+            for c in it.classes[id].bases {
+                out.append(.klass(id: c))
+            }
+            return it.newTuple(out)
+        }
+        "__dict__" -> {
+            let d = it.newDict()
+            for (k, v) in it.classes[id].attrs {
+                dictSet(it.dicts[d], .str(s: k), "s" + k, v)
+            }
+            return .dict(id: d)
+        }
+        "__qualname__" -> { return .str(s: it.classes[id].name) }
+        "__module__" -> { return .str(s: if it.classIds[it.classes[id].name] == id { "builtins" } else { "__main__" }) }
+        "__doc__" -> { return .none }
+        "__class__" -> { return typeOf(it, o) }
+        "__abstractmethods__" -> {
+            var out: [Value] = []
+            for a in it.classes[id].abstracts {
+                out.append(.str(s: a))
+            }
+            return makeSet(it, out)
+        }
+        "__new__" -> { return .builtin(name: if it.classes[id].isMeta { "type.__new__" } else { "object.__new__" }) }
+        "__init__", "__setattr__", "__getattribute__", "__delattr__", "__init_subclass__", "__eq__", "__ne__", "__hash__",
+        "__repr__", "__str__" -> {
+            return .builtin(name: "object." + name)
+        }
+        "__call__" -> { return it.newBound(o, .builtin(name: "type.__call__")) }
+        "__subclasses__" -> { return it.newBound(o, .builtin(name: "type.__subclasses__")) }
+        "mro" -> { return it.newBound(o, .builtin(name: "type.mro")) }
+        _ -> {}
+    }
+    if meta >= 0 {
+        let fallback = classAttr(it, meta, "__getattr__")
+        if fallback != Value.absent {
+            return it.callValue(fallback, [o, .str(s: name)], [], [])
+        }
+    }
+    Value.absent
+}
+
+// super().name where what `super()` stands for is a class `k`: in a
+// classmethod or `__new__` (the classes after `cls` in k's own order), or
+// in a metaclass's method, where `k` is the object (the classes after
+// `cls` in its metaclass's order). `.absent` if there's no such attribute.
+fn superClassAttr(_ it: bind Interp, _ receiver: Value, _ k: Int, _ cls: Int, _ name: String) -> Value {
+    if isSubclass(it, k, cls) {
+        var after = false
+        for c in it.classes[k].mro {
+            if after {
+                if let v = it.classes[c].attrs[name] {
+                    match v {
+                        .function(_) -> {
+                            if name == "__init_subclass__" || name == "__class_getitem__" {
+                                return it.newBound(receiver, v)
+                            }
+                            return v
+                        }
+                        .wrapper(kind, cell) -> {
+                            if kind == 0 {
+                                return it.cells[cell]
+                            }
+                            if kind == 1 {
+                                return it.newBound(receiver, it.cells[cell])
+                            }
+                            return v
+                        }
+                        _ -> { return v }
+                    }
+                }
+            }
+            if c == cls {
+                after = true
+            }
+        }
+        if name == "__new__" {
+            return .builtin(name: if it.classes[k].isMeta { "type.__new__" } else { "object.__new__" })
+        }
+        if name == "__init_subclass__" {
+            return .builtin(name: "@noop")
+        }
+        if name == "__init__" {
+            return .builtin(name: "object.__init__")
+        }
+        return Value.absent
+    }
+    var meta = it.classes[k].meta
+    if meta < 0 {
+        meta = typeClass(it)
+    }
+    var after = false
+    for c in it.classes[meta].mro {
+        if after {
+            if let v = it.classes[c].attrs[name] {
+                return bindAttr(it, v, receiver, c)
+            }
+        }
+        if c == cls {
+            after = true
+        }
+    }
+    match name {
+        "__init__" -> .builtin(name: "@noop")
+        "__call__" -> it.newBound(receiver, .builtin(name: "type.__call__"))
+        "__new__" -> .builtin(name: "type.__new__")
+        "__setattr__", "__getattribute__", "__delattr__", "__repr__", "__str__" -> it.newBound(receiver, .builtin(name: "object." + name))
+        _ -> Value.absent
+    }
+}
+
+// What every object has, for `super().name` in an ordinary method when no
+// class has it: object's own way.
+fn objectFallback(_ it: bind Interp, _ receiver: Value, _ name: String) -> Value {
+    match name {
+        "__setattr__", "__getattribute__", "__delattr__", "__eq__", "__ne__", "__hash__", "__repr__", "__str__" -> {
+            it.newBound(receiver, .builtin(name: "object." + name))
+        }
+        "__init_subclass__" -> .builtin(name: "@noop")
+        _ -> Value.absent
+    }
+}
+
+// Class[index]: its metaclass's `__getitem__`, its own `__class_getitem__`,
+// or (list[int] and the like, in annotations) the class itself.
+fn classGetItem(_ it: bind Interp, _ o: Value, _ id: Int, _ index: Value) -> Value {
+    let viaMeta = metaMethod(it, id, "__getitem__")
+    if viaMeta != Value.absent {
+        return it.callValue(viaMeta, [o, index], [], [])
+    }
+    var own = classAttr(it, id, "__class_getitem__")
+    match own {
+        .wrapper(_, cell) -> { own = it.cells[cell] }
+        _ -> {}
+    }
+    if own != Value.absent {
+        return it.callValue(own, [o, index], [], [])
+    }
+    if it.classIds[it.classes[id].name] == id {
+        return o
+    }
+    it.throw("TypeError", "type '{it.classes[id].name}' is not subscriptable")
+}
+
+// ---- making classes ----
+
+// The classes a class statement (or type(…)) names as bases.
+fn baseClasses(_ it: bind Interp, _ values: [Value]) -> [Int]? {
+    var bases: [Int] = []
+    for v in values {
+        match v {
+            .klass(id) -> { bases.append(id) }
+            .builtin(name) -> {
+                if name == "type" {
+                    bases.append(typeClass(it))
+                } else if isTypeName(name) {
+                    it.throw("TypeError", "PyTessel can't make a class that inherits from the built-in type '{name}'")
+                    return nil
+                } else {
+                    it.throw("TypeError", "a class's bases must be classes")
+                    return nil
+                }
+            }
+            _ -> {
+                it.throw("TypeError", "a class's bases must be classes")
+                return nil
+            }
+        }
+    }
+    bases
+}
+
+// A class statement's class: `vars` are what its body made. With a
+// metaclass (its own, `metaclass=M`, or a base's), the metaclass is
+// called to make it.
+fn buildClass(_ it: bind Interp, _ name: String, _ baseValues: [Value], _ vars: [String: Value],
+              _ kwNames: [String], _ kwValues: [Value]) -> Value {
+    var meta = -1
+    var names: [String] = []
+    var values: [Value] = []
+    for i in kwNames.indices {
+        if kwNames[i] == "metaclass" {
+            match kwValues[i] {
+                .klass(m) -> { meta = m }
+                .builtin(_) -> {}
+                _ -> { return it.throw("TypeError", "metaclass must be a class") }
+            }
+        } else {
+            names.append(kwNames[i])
+            values.append(kwValues[i])
+        }
+    }
+    if let bases = baseClasses(it, baseValues) {
+        meta = derivedMeta(it, meta, bases)
+        if meta >= 0 && meta != typeClass(it) {
+            let ns = it.newDict()
+            for (k, v) in vars {
+                dictSet(it.dicts[ns], .str(s: k), "s" + k, v)
+            }
+            var baseList: [Value] = []
+            for b in bases {
+                baseList.append(.klass(id: b))
+            }
+            return it.callValue(.klass(id: meta), [.str(s: name), it.newTuple(baseList), .dict(id: ns)], names, values)
+        }
+        return createClass(it, name, bases, vars, -1, names, values)
+    }
+    Value.none
+}
+
+// The metaclass of a class with these bases: the one given, or the most
+// particular of the bases' metaclasses.
+fn derivedMeta(_ it: bind Interp, _ given: Int, _ bases: [Int]) -> Int {
+    var meta = given
+    for b in bases {
+        let m = it.classes[b].meta
+        if m >= 0 && (meta < 0 || isSubclass(it, m, meta)) {
+            meta = m
+        }
+    }
+    meta
+}
+
+// Makes a class: what `type.__new__` does.
+fn createClass(_ it: bind Interp, _ name: String, _ given: [Int], _ attrs: [String: Value], _ meta: Int,
+               _ kwNames: [String], _ kwValues: [Value]) -> Value {
+    var bases = given
+    if bases.isEmpty {
+        bases = [it.classIds["object"] ?? 0]
+    }
+    let id = makeClass(it, name, bases, attrs)
+    let own = derivedMeta(it, meta, bases)
+    if own >= 0 && own != typeClass(it) {
+        it.classes[id].meta = own
+        finishClass(it, id)
+    }
+    let made = Value.klass(id: id)
+    // Descriptors are told their name.
+    for key in attrs.keys.sorted() {
+        match attrs[key] ?? Value.none {
+            .instance(d) -> {
+                let teller = classAttr(it, it.instances[d].cls, "__set_name__")
+                if teller != Value.absent {
+                    it.callValue(teller, [attrs[key] ?? Value.none, made, .str(s: key)], [], [])
+                    if it.signal != .none {
+                        return Value.none
+                    }
+                }
+            }
+            _ -> {}
+        }
+    }
+    // The class it inherits from is told of it.
+    var hook = Value.absent
+    for c in it.classes[id].mro {
+        if c != id {
+            if let v = it.classes[c].attrs["__init_subclass__"] {
+                hook = v
+                break
+            }
+        }
+    }
+    match hook {
+        .wrapper(_, cell) -> { hook = it.cells[cell] }
+        _ -> {}
+    }
+    if hook != Value.absent {
+        it.callValue(hook, [made], kwNames, kwValues)
+        if it.signal != .none {
+            return Value.none
+        }
+    } else if !kwNames.isEmpty {
+        return it.throw("TypeError", "{name}.__init_subclass__() takes no keyword arguments")
+    }
+    made
+}
+
+// type.__new__(metaclass, name, bases, namespace), and type(name, bases, namespace).
+fn typeNew(_ it: bind Interp, _ mcs: Int, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
+    if args.count != 3 {
+        return it.throw("TypeError", "type() takes 1 or 3 arguments")
+    }
+    var name = ""
+    match args[0] {
+        .str(s) -> { name = s }
+        _ -> { return it.throw("TypeError", "type.__new__() argument 1 must be str, not {typeName(it, args[0])}") }
+    }
+    var baseValues: [Value] = []
+    match args[1] {
+        .tuple(t) -> { baseValues = it.lists[t] }
+        _ -> { return it.throw("TypeError", "type.__new__() argument 2 must be tuple, not {typeName(it, args[1])}") }
+    }
+    var attrs: [String: Value] = [:]
+    match args[2] {
+        .dict(d) -> {
+            let keys = dictKeys(it.dicts[d])
+            let values = dictValues(it.dicts[d])
+            for i in keys.indices {
+                match keys[i] {
+                    .str(s) -> { attrs[s] = values[i] }
+                    _ -> {}
+                }
+            }
+        }
+        _ -> { return it.throw("TypeError", "type.__new__() argument 3 must be dict, not {typeName(it, args[2])}") }
+    }
+    if let bases = baseClasses(it, baseValues) {
+        return createClass(it, name, bases, attrs, mcs, kwNames, kwValues)
+    }
+    Value.none
+}
+
+// ---- making objects ----
+
+// A new object with nothing in it: object.__new__(cls).
+fn plainInstance(_ it: bind Interp, _ cls: Int) -> Value {
+    let abstracts = it.classes[cls].abstracts
+    if !abstracts.isEmpty {
+        var quoted: [String] = []
+        for a in abstracts {
+            quoted.append("'{a}'")
+        }
+        let s = if abstracts.count == 1 { "" } else { "s" }
+        return it.throw("TypeError", "Can't instantiate abstract class {it.classes[cls].name} without an implementation for abstract method{s} {quoted.joined(separator: ", ")}")
+    }
+    it.instances.append(Instance(cls: cls))
+    let id = it.instances.count - 1
+    if isSubclass(it, cls, it.classIds["BaseException"] ?? -1) {
+        it.instances[id].fields["args"] = it.newTuple([])
+    }
+    Value.instance(id: id)
+}
+
+// Class(…) for a class that isn't made the plain way: its metaclass's
+// `__call__` if it has one, or what `type.__call__` does.
+fn customInstantiate(_ it: bind Interp, _ cls: Int, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
+    let call = metaMethod(it, cls, "__call__")
+    if call != Value.absent {
+        var all = [Value.klass(id: cls)]
+        all.appendAll(args)
+        return it.callValue(call, all, kwNames, kwValues)
+    }
+    typeCall(it, cls, args, kwNames, kwValues)
+}
+
+// type.__call__(cls, …): `__new__`, then `__init__` if it made one of the class's.
+fn typeCall(_ it: bind Interp, _ cls: Int, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
+    var all = [Value.klass(id: cls)]
+    all.appendAll(args)
+    var maker = classAttr(it, cls, "__new__")
+    match maker {
+        .wrapper(_, cell) -> { maker = it.cells[cell] }
+        _ -> {}
+    }
+    if it.classes[cls].isMeta {
+        // A metaclass makes classes.
+        if cls == typeClass(it) && args.count == 1 {
+            return typeOf(it, args[0])
+        }
+        var made = Value.none
+        if maker == Value.absent {
+            made = typeNew(it, cls, args, kwNames, kwValues)
+        } else {
+            made = it.callValue(maker, all, kwNames, kwValues)
+        }
+        if it.signal != .none {
+            return Value.none
+        }
+        match made {
+            .klass(_) -> {
+                let initializer = classAttr(it, cls, "__init__")
+                if initializer != Value.absent {
+                    var both = [made]
+                    both.appendAll(args)
+                    it.callValue(initializer, both, kwNames, kwValues)
+                    if it.signal != .none {
+                        return Value.none
+                    }
+                }
+            }
+            _ -> {}
+        }
+        return made
+    }
+    let initializer = classAttr(it, cls, "__init__")
+    var made = Value.none
+    if maker == Value.absent {
+        made = plainInstance(it, cls)
+        if it.signal != .none {
+            return Value.none
+        }
+        match made {
+            .instance(id) -> {
+                if isSubclass(it, cls, it.classIds["BaseException"] ?? -1) {
+                    it.instances[id].fields["args"] = it.newTuple(args)
+                }
+            }
+            _ -> {}
+        }
+        if initializer == Value.absent && (!args.isEmpty || !kwNames.isEmpty) && !isSubclass(it, cls, it.classIds["BaseException"] ?? -1) {
+            return it.throw("TypeError", "{it.classes[cls].name}() takes no arguments")
+        }
+    } else {
+        made = it.callValue(maker, all, kwNames, kwValues)
+        if it.signal != .none {
+            return Value.none
+        }
+    }
+    match made {
+        .instance(id) -> {
+            if isSubclass(it, it.instances[id].cls, cls) && initializer != Value.absent {
+                var both = [made]
+                both.appendAll(args)
+                it.callValue(initializer, both, kwNames, kwValues)
+                if it.signal != .none {
+                    return Value.none
+                }
+            }
+        }
+        _ -> {}
+    }
+    made
+}
+
+// The methods of `object` and `type` themselves, called by name:
+// object.__new__(cls), object.__setattr__(self, name, v), type.__new__(…), …
+// Nil if `name` isn't one of them.
+fn objectMethod(_ it: bind Interp, _ type: String, _ name: String, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value? {
+    if type == "type" {
+        match name {
+            "__new__" -> {
+                if args.isEmpty {
+                    return it.throw("TypeError", "type.__new__(): not enough arguments")
+                }
+                match args[0] {
+                    .klass(mcs) -> { return typeNew(it, mcs, args.dropFirst(), kwNames, kwValues) }
+                    .builtin(_) -> { return typeNew(it, -1, args.dropFirst(), kwNames, kwValues) }
+                    _ -> { return it.throw("TypeError", "type.__new__(X): X is not a type object ({typeName(it, args[0])})") }
+                }
+            }
+            "__call__" -> {
+                if !args.isEmpty {
+                    match args[0] {
+                        .klass(cls) -> { return typeCall(it, cls, args.dropFirst(), kwNames, kwValues) }
+                        _ -> { return it.callValue(args[0], args.dropFirst(), kwNames, kwValues) }
+                    }
+                }
+                return it.throw("TypeError", "descriptor '__call__' of 'type' object needs an argument")
+            }
+            "__init__" -> { return Value.none }
+            "__subclasses__" -> {
+                var out: [Value] = []
+                if !args.isEmpty {
+                    match args[0] {
+                        .klass(cls) -> {
+                            for c in it.classes.indices {
+                                if it.classes[c].bases.contains(cls) {
+                                    out.append(.klass(id: c))
+                                }
+                            }
+                        }
+                        _ -> {}
+                    }
+                }
+                return it.newList(out)
+            }
+            "mro" -> {
+                var out: [Value] = []
+                if !args.isEmpty {
+                    match args[0] {
+                        .klass(cls) -> {
+                            for c in it.classes[cls].mro {
+                                out.append(.klass(id: c))
+                            }
+                        }
+                        _ -> {}
+                    }
+                }
+                return it.newList(out)
+            }
+            _ -> { return nil }
+        }
+    }
+    if type != "object" {
+        return nil
+    }
+    match name {
+        "__new__" -> {
+            if !args.isEmpty {
+                match args[0] {
+                    .klass(cls) -> {
+                        if it.classes[cls].isMeta {
+                            return it.throw("TypeError", "object.__new__({it.classes[cls].name}) is not safe, use type.__new__()")
+                        }
+                        return plainInstance(it, cls)
+                    }
+                    _ -> {}
+                }
+                return it.throw("TypeError", "object.__new__(X): X is not a type object ({typeName(it, args[0])})")
+            }
+            return it.throw("TypeError", "object.__new__(): not enough arguments")
+        }
+        "__init__", "__init_subclass__" -> { return Value.none }
+        "__setattr__" -> {
+            if args.count != 3 {
+                return it.throw("TypeError", "expected 2 arguments, got {if args.isEmpty { 0 } else { args.count - 1 }}")
+            }
+            match args[1] {
+                .str(attribute) -> {
+                    match args[0] {
+                        .instance(id) -> objectSet(it, args[0], id, attribute, args[2], false)
+                        _ -> setAttr(it, args[0], attribute, args[2])
+                    }
+                    return Value.none
+                }
+                _ -> { return it.throw("TypeError", "attribute name must be string, not '{typeName(it, args[1])}'") }
+            }
+        }
+        "__getattribute__", "__delattr__" -> {
+            if args.count != 2 {
+                return it.throw("TypeError", "expected 1 argument, got {if args.isEmpty { 0 } else { args.count - 1 }}")
+            }
+            match args[1] {
+                .str(attribute) -> {
+                    match args[0] {
+                        .instance(id) -> {
+                            if name == "__delattr__" {
+                                objectDelete(it, args[0], id, attribute, false)
+                                return Value.none
+                            }
+                            return objectGet(it, args[0], id, attribute, false)
+                        }
+                        _ -> {
+                            if name == "__delattr__" {
+                                deleteAttr(it, args[0], attribute)
+                                return Value.none
+                            }
+                            return getAttr(it, args[0], attribute)
+                        }
+                    }
+                }
+                _ -> { return it.throw("TypeError", "attribute name must be string, not '{typeName(it, args[1])}'") }
+            }
+        }
+        "__eq__", "__ne__" -> {
+            if args.count != 2 {
+                return it.throw("TypeError", "expected 1 argument, got {if args.isEmpty { 0 } else { args.count - 1 }}")
+            }
+            if args[0] == args[1] {
+                return .bool(b: name == "__eq__")
+            }
+            return Value.notImplemented
+        }
+        "__hash__" -> {
+            match args.first ?? Value.none {
+                .instance(id) -> { return .int(i: 0x30000000 + id * 8) }
+                _ -> { return callBuiltin(it, "hash", args, [], []) }
+            }
+        }
+        "__repr__", "__str__" -> {
+            match args.first ?? Value.none {
+                .instance(id) -> {
+                    if name == "__str__" {
+                        return .str(s: toRepr(it, args[0]))
+                    }
+                    return .str(s: "<__main__.{it.classes[it.instances[id].cls].name} object>")
+                }
+                _ -> { return .str(s: toRepr(it, args.first ?? Value.none)) }
+            }
+        }
+        _ -> { return nil }
+    }
+}

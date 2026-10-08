@@ -22,6 +22,12 @@ struct Interp {
     cells: [Value] = []
     // The functions that set properties (`@x.setter`), by the property's cell.
     setters: [Int: Value] = [:]
+    deleters: [Int: Value] = [:]
+    // (A metaclass's `__setattr__` is setting a class's attribute itself.)
+    settingClass: Bool = false
+    // For each number hash() gave for a built-in value, the value's key
+    // as a dictionary has it (see `hashKey`).
+    hashTexts: [Int: String] = [:]
 
     // Variables: `envs[env]` is where the running code's are.
     envs: [Env] = []
@@ -282,6 +288,7 @@ struct Interp {
             .bytesLit(v) -> newBytes(v, false)
             .noneLit -> .none
             .ellipsisLit -> .ellipsis
+            .notImplementedLit -> .notImplemented
             .trueLit -> .bool(b: true)
             .falseLit -> .bool(b: false)
             .binary(op, l, r) -> {
@@ -1738,22 +1745,29 @@ struct Interp {
     }
 
     fn classDefinition(_ name: String, _ baseNodes: [Int], _ body: [Int], _ decorators: [Int]) {
-        var bases: [Int] = []
+        var bases: [Value] = []
+        var kwNames: [String] = []
+        var kwValues: [Value] = []
         for b in baseNodes {
-            let v = eval(b)
+            var key = ""
+            var node = b
+            match prog.nodes[b] {
+                .classKeyword(k, value) -> {
+                    key = k
+                    node = value
+                }
+                _ -> {}
+            }
+            let v = eval(node)
             if signal != .none {
                 return
             }
-            match v {
-                .klass(id) -> { bases.append(id) }
-                _ -> {
-                    throw("TypeError", "a class's bases must be classes")
-                    return
-                }
+            if key != "" {
+                kwNames.append(key)
+                kwValues.append(v)
+            } else {
+                bases.append(v)
             }
-        }
-        if bases.isEmpty {
-            bases = [classIds["object"] ?? 0]
         }
         // The body runs with variables of its own, which become the
         // class's attributes.
@@ -1770,9 +1784,12 @@ struct Interp {
             releaseEnv(inner)
             return
         }
-        let id = makeClass(self, name, bases, envs[inner].vars)
+        let vars = envs[inner].vars
         releaseEnv(inner)
-        var cls = Value.klass(id: id)
+        var cls = buildClass(self, name, bases, vars, kwNames, kwValues)
+        if signal != .none {
+            return
+        }
         cls = decorate(cls, decorators)
         if signal != .none {
             return

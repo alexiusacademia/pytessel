@@ -1,0 +1,87 @@
+Ada 36 [('_age', 36), ('_name', 'Ada')]
+38 38
+TypeError: Person.age must be int, not str
+TypeError: Person.name must be str, not int
+Typed name _age Person
+deleting age
+unset
+Bob Ada 1 unset
+Ada
+Ada True False
+Eve
+computing area
+12
+12
+computing area
+Lazy on the class 3
+overwritten
+computing area
+12
+('const', False, 'Holder') ('const', True, 'Holder')
+own ('const', True, 'Holder')
+('const', False, 'Sub') ('const', True, 'Sub')
+42
+AttributeError: can't set this
+AttributeError: __set__
+__delete__ called
+OnlyDelete
+hello from Late 5 5
+100 212.0 373
+-273
+ValueError: too cold
+AttributeError: property 'fahrenheit' of 'Temperature' object has no setter
+AttributeError: property 'fahrenheit' of 'Temperature' object has no deleter
+deleter runs
+None property True
+1
+10 2 12
+AttributeError: 'P' object has no attribute 'z'
+AttributeError: 'P' object has no attribute '__dict__'
+AttributeError: 'P' object has no attribute 'z'
+AttributeError: 'P' object has no attribute 'y'
+5 True False False ('x', 'y')
+1 2 3
+AttributeError: 'P3' object has no attribute 'w'
+fine {'anything': 'fine'} 1
+AttributeError: 'One' object has no attribute 'other'
+1
+class level
+AttributeError: 'WithClassAttr' object attribute 'shared' is read-only
+AttributeError: 'Empty' object has no attribute 'a'
+real made up x1 made up xyz default True False
+AttributeError: no other
+1 2 ['value', 'method', 'value']
+AttributeError: 'Logged' object has no attribute 'missing'
+abc plain fallback for other
+5 x ['count', 'extra', 'name']
+ValueError: count can't be negative
+AttributeError: name stays
+AttributeError: 'Validated' object has no attribute 'extra'
+ValueError: count can't be negative
+9
+1 2
+AttributeError: can't set a: frozen
+AttributeError: can't delete a: frozen
+21 42 21
+['alpha', 'b', 'zeta']
+['alpha', 'b', 'gamma'] alpha b gamma False
+TypeError: Nope.__init_subclass__() takes no keyword arguments
+Box[int] Box[x] Box[Box]
+TypeError: type 'NoItems' is not subscriptable
+True 2 2
+QUIET str
+1 one 2 two more 2 TrackedChild
+Tracked False
+Money(6) Money(7) Money(8) Money(3) coupon applied to Money(5)
+True False False True True True True
+True False True False
+TypeError: unsupported operand type(s) for +: 'Money' and 'str'
+TypeError: can only concatenate str (not "Money") to str
+TypeError: unsupported operand type(s) for +: 'Money' and 'float'
+TypeError: '<' not supported between instances of 'Money' and 'int'
+TypeError: '<' not supported between instances of 'int' and 'Money'
+TypeError: '<=' not supported between instances of 'Money' and 'str'
+TypeError: '>=' not supported between instances of 'Money' and 'int'
+TypeError: unsupported operand type(s) for -: 'Money' and 'int'
+NotImplemented NotImplemented NotImplementedType True NotImplemented
+[Money(1), Money(2), Money(3)] Money(7) True 0
