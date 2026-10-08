@@ -2302,6 +2302,9 @@ fn getAttr(_ it: bind Interp, _ o: Value, _ name: String) -> Value {
             if name == "__name__" {
                 return .str(s: b)
             }
+            if name == "__call__" && !isTypeName(b) {
+                return o
+            }
             if isTypeName(b) && hasMethod(b, name) {
                 // str.upper, dict.fromkeys: the type's method, unbound.
                 return .builtin(name: b + "." + name)
@@ -2348,6 +2351,9 @@ fn getAttr(_ it: bind Interp, _ o: Value, _ name: String) -> Value {
             }
             if name == "__class__" {
                 return typeOf(it, o)
+            }
+            if name.hasPrefix("__") && hasSpecial(it, o, name) {
+                return it.newBound(o, .builtin(name: "@" + name))
             }
             match o {
                 .slice(id) -> {

@@ -386,6 +386,15 @@ fn strRepr(_ s: String) -> String {
         plain = false
     }
     if plain {
+        // (Control characters are written as escapes too.)
+        for b in Data(text: s).bytes {
+            if b < 32 || b == 127 || b == 0xC2 {
+                plain = false
+                break
+            }
+        }
+    }
+    if plain {
         return quote + s + quote
     }
     var out = quote
@@ -400,8 +409,16 @@ fn strRepr(_ s: String) -> String {
             out += "\\r"
         } else if c == quote {
             out += "\\" + quote
+        } else if c == "\r\n" {
+            out += "\\r\\n"
         } else {
-            out += c
+            let code = ordOf(c)
+            if code < 32 || (code >= 127 && code < 161) || code == 173 {
+                let digits = "0123456789abcdef".characters
+                out += "\\x" + digits[(code >> 4) & 15] + digits[code & 15]
+            } else {
+                out += c
+            }
         }
     }
     out + quote

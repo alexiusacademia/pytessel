@@ -7,7 +7,8 @@ fn hasMethod(_ type: String, _ name: String) -> Bool {
                   "endswith", "find", "rfind", "index", "rindex", "count", "format", "isdigit", "isalpha", "isalnum",
                   "isspace", "isupper", "islower", "isnumeric", "isdecimal", "title", "capitalize", "swapcase",
                   "center", "ljust", "rjust", "zfill", "splitlines", "partition", "rpartition", "casefold",
-                  "removeprefix", "removesuffix", "encode", "isidentifier"].contains(name)
+                  "removeprefix", "removesuffix", "encode", "isidentifier", "expandtabs", "translate",
+                  "maketrans"].contains(name)
         "list" -> ["append", "extend", "insert", "remove", "pop", "clear", "index", "count", "sort", "reverse", "copy"].contains(name)
         "dict" -> ["get", "keys", "values", "items", "pop", "setdefault", "update", "clear", "copy", "popitem", "fromkeys"].contains(name)
         "set" -> ["add", "remove", "discard", "pop", "clear", "copy", "union", "intersection", "difference",
@@ -444,13 +445,6 @@ fn strMethod(_ it: bind Interp, _ s: String, _ name: String, _ args: [Value], _ 
             }
             Value.str(s: "0".repeated(width - count) + s)
         }
-        "splitlines" -> {
-            var out: [Value] = []
-            for l in s.lines() {
-                out.append(.str(s: l))
-            }
-            it.newList(out)
-        }
         "partition", "rpartition" -> {
             if let sep = textArg(it, args, 0, name) {
                 if sep == "" {
@@ -494,7 +488,12 @@ fn strMethod(_ it: bind Interp, _ s: String, _ name: String, _ args: [Value], _ 
             }
             Value.none
         }
-        _ -> it.throw("AttributeError", "'str' object has no attribute '{name}'")
+        _ -> {
+            if let result = moreStrMethod(it, s, name, args, kwNames, kwValues) {
+                return result
+            }
+            it.throw("AttributeError", "'str' object has no attribute '{name}'")
+        }
     }
 }
 
@@ -917,6 +916,9 @@ fn typeMethod(_ it: bind Interp, _ type: String, _ name: String, _ args: [Value]
         }
         return .dict(id: id)
     }
+    if type == "str" && name == "maketrans" {
+        return strMaketrans(it, args)
+    }
     if type == "object" || type == "type" {
         if let result = objectMethod(it, type, name, args, kwNames, kwValues) {
             return result
@@ -936,6 +938,17 @@ fn typeMethod(_ it: bind Interp, _ type: String, _ name: String, _ args: [Value]
 
 // receiver.name(args): a method call.
 fn callMethod(_ it: bind Interp, _ receiver: Value, _ name: String, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
+    if name.hasPrefix("__") {
+        // [].__len__(), (1).__add__(2): a built-in value's special method.
+        match receiver {
+            .instance(_), .klass(_), .module(_), .superRef(_, _), .iterator(_), .file(_), .builtin(_) -> {}
+            _ -> {
+                if let result = specialCall(it, receiver, name, args) {
+                    return result
+                }
+            }
+        }
+    }
     match receiver {
         .instance(id) -> {
             let cls = it.instances[id].cls

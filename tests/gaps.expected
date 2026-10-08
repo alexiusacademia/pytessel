@@ -1,0 +1,52 @@
+1-2-3 1+2  1!
+(1, 2, False) (1, 2, True) (1, 'k', False)
+TypeError: bare_star() missing 1 required keyword-only argument: 'key'
+TypeError: bare_star() takes 1 positional argument but 2 were given
+TypeError: bare_star() got an unexpected keyword argument 'other'
+TypeError: bare_star() takes 1 positional argument but 2 positional arguments (and 1 keyword-only argument) were given
+3
+TypeError: two_required() missing 2 required keyword-only arguments: 'x' and 'y'
+TypeError: two_required() missing 1 required keyword-only argument: 'y'
+(1, 2, (), 3, 4, []) (1, 20, (30, 40), 3, 5, [('e', 6)]) (0, 2, (), 1, 4, [])
+TypeError: everything() missing 1 required keyword-only argument: 'c'
+[2, 4] [10]
+w 1 red 3
+widget
+[0, 1, 2]
+stamp stamp ['evaluated']
+10 3 11 4
+6 [6, 6] ['x', 'y', 'z']
+NameError: name 'missing' is not defined
+49 thing thing
+202
+module x False
+1 [('a', 50), ('b', 2), ('c', 3)]
+NameError: name 'x' is not defined
+SyntaxError: invalid syntax (<string>, line 1)
+SyntaxError: invalid syntax (<string>, line 1)
+TypeError: exec() globals must be a dict, not int
+here HERE 2 [0, 2, 4]
+('local!', 'from dict')
+tuple key True False None
+{(1, 2): 'set through a Pair'} 1
+1 True False True 2
+2 2 True False
+TypeError: unhashable type: 'Unhashable'
+TypeError: unhashable type: 'Unhashable'
+TypeError: unhashable type: 'OnlyEq'
+True True
+True True False True True True False True False True True True False True
+3 3 True False 7 -2 abab [1, 2] 1024 1 3 -9 True False True 4 z 1 3.0 3 -3 's' 5 [1, 2] False
+[10, 3] [10, 3] [11, 12] skip
+3 True str True
+AttributeError: 'int' object has no attribute '__len__'
+AttributeError: 'list' object has no attribute '__nothing__'
+5 255 35 31 5 42
+ValueError: invalid literal for int() with base 2: '12'
+'a       b       c' 'a   bcd e' '  x' 'ab\n   c' 'no tabs' 'ab'
+xxyyzz zxy heo hipp AC 1c [(97, 120), (98, 121), (99, 122)]
+ValueError: the first two maketrans arguments must have equal length
+TypeError: if you give only one argument to maketrans it must be a dict
+['a', 'b', 'c', 'd'] ['a\n', 'b\r\n', 'c\r', 'd\n'] ['one'] [] [''] ['a\n', '\n', 'b'] ['x']
+'\x00' '\x1b[0m' 'a\x07b' '\x7f' 'tab\t nl\n cr\r' "q'\x01" ['\x00\x1f'] 'é ü' '\x80\xa0' 'back\\slash'
+True ('big',)

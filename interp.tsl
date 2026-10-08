@@ -951,6 +951,15 @@ struct Interp {
         if args.count > count && def.varargs == "" {
             let s = if count == 1 { "" } else { "s" }
             let were = if args.count == 1 { "was" } else { "were" }
+            var named = 0
+            for k in kwNames {
+                if def.kwonly.contains(k) {
+                    named += 1
+                }
+            }
+            if named > 0 {
+                return throw("TypeError", "{def.name}() takes {count} positional argument{s} but {args.count} positional argument{if args.count == 1 { "" } else { "s" }} (and {named} keyword-only argument{if named == 1 { "" } else { "s" }}) were given")
+            }
             return throw("TypeError", "{def.name}() takes {count} positional argument{s} but {args.count} {were} given")
         }
         let e = newEnv(c.env)

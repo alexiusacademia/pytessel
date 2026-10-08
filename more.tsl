@@ -1,0 +1,355 @@
+// Smaller things: the special methods of built-in values called by name
+// (`[].__len__()`), exec and eval in a namespace, and a few methods of str.
+
+// ---- special methods of built-in values ----
+
+// The operator a special method's name stands for (nil if it's not one).
+fn operatorOf(_ name: String) -> BinOp? {
+    match name {
+        "add" -> { return BinOp.add }
+        "sub" -> { return BinOp.sub }
+        "mul" -> { return BinOp.mul }
+        "truediv" -> { return BinOp.div }
+        "floordiv" -> { return BinOp.floorDiv }
+        "mod" -> { return BinOp.mod }
+        "pow" -> { return BinOp.pow }
+        "lshift" -> { return BinOp.lshift }
+        "rshift" -> { return BinOp.rshift }
+        "and" -> { return BinOp.bitAnd }
+        "or" -> { return BinOp.bitOr }
+        "xor" -> { return BinOp.bitXor }
+        _ -> { return nil }
+    }
+}
+
+// Whether a built-in value has a special method of this name.
+fn hasSpecial(_ it: bind Interp, _ o: Value, _ name: String) -> Bool {
+    let type = typeName(it, o)
+    let sized = ["list", "tuple", "str", "dict", "set", "bytes", "bytearray", "range"].contains(type)
+    match name {
+        "__len__" -> sized
+        "__iter__" -> isIterable(it, o)
+        "__contains__" -> sized
+        "__getitem__" -> sized && type != "set"
+        "__setitem__", "__delitem__" -> type == "list" || type == "dict" || type == "bytearray"
+        "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__", "__repr__", "__str__", "__format__", "__sizeof__",
+        "__dir__", "__init__", "__reduce__" -> true
+        "__hash__" -> type != "list" && type != "dict" && type != "set" && type != "bytearray"
+        "__bool__", "__int__", "__float__", "__index__", "__abs__", "__neg__", "__pos__" -> type == "int" || type == "float" || type == "bool"
+        "__call__" -> type == "function" || type == "builtin_function_or_method" || type == "method" || type == "type"
+        "__enter__", "__exit__" -> type == "TextIOWrapper" || type == "BufferedReader" || type == "BufferedWriter"
+        _ -> {
+            if name.hasPrefix("__") && name.hasSuffix("__") && name.count > 4 {
+                var inner = name.substring(from: 2, to: name.count - 2)
+                if inner.hasPrefix("r") && operatorOf(inner.substring(from: 1, to: inner.count)) != nil {
+                    inner = inner.substring(from: 1, to: inner.count)
+                }
+                if let op = operatorOf(inner) {
+                    let number = type == "int" || type == "float" || type == "bool"
+                    if op == .add || op == .mul {
+                        return number || ["str", "list", "tuple", "bytes", "bytearray"].contains(type)
+                    }
+                    if op == .mod {
+                        return number || type == "str"
+                    }
+                    if op == .sub || op == .bitAnd || op == .bitOr || op == .bitXor {
+                        return number || type == "set" || (type == "dict" && op == .bitOr)
+                    }
+                    return number
+                }
+            }
+            false
+        }
+    }
+}
+
+// A built-in value's special method, called by name. Nil if it has none
+// of that name.
+fn specialCall(_ it: bind Interp, _ o: Value, _ name: String, _ args: [Value]) -> Value? {
+    if !hasSpecial(it, o, name) {
+        return nil
+    }
+    let one = args.count == 1
+    match name {
+        "__len__" -> { return lengthOf(it, o) }
+        "__iter__" -> { return getIter(it, o) }
+        "__repr__" -> { return .str(s: toRepr(it, o)) }
+        "__str__" -> { return .str(s: toStr(it, o)) }
+        "__hash__" -> { return callBuiltin(it, "hash", [o], [], []) }
+        "__bool__" -> { return .bool(b: truthy(it, o)) }
+        "__int__", "__index__" -> { return toInt(it, [o]) }
+        "__float__" -> { return toFloat(it, [o]) }
+        "__abs__" -> { return callBuiltin(it, "abs", [o], [], []) }
+        "__neg__" -> { return unaryOp(it, .neg, o) }
+        "__pos__" -> { return unaryOp(it, .pos, o) }
+        "__call__" -> { return it.callValue(o, args, [], []) }
+        "__init__" -> { return Value.none }
+        "__format__" -> { return .str(s: formatValue(it, o, if one { toStr(it, args[0]) } else { "" })) }
+        _ -> {}
+    }
+    if name == "__setitem__" && args.count == 2 {
+        setItem(it, o, args[0], args[1])
+        return Value.none
+    }
+    if !one {
+        return nil
+    }
+    match name {
+        "__contains__" -> { return .bool(b: contains(it, o, args[0])) }
+        "__getitem__" -> { return getItem(it, o, args[0]) }
+        "__delitem__" -> {
+            deleteItem(it, o, args[0])
+            return Value.none
+        }
+        "__eq__" -> { return .bool(b: compareOp(it, .eq, o, args[0])) }
+        "__ne__" -> { return .bool(b: compareOp(it, .ne, o, args[0])) }
+        "__lt__" -> { return .bool(b: compareOp(it, .lt, o, args[0])) }
+        "__le__" -> { return .bool(b: compareOp(it, .le, o, args[0])) }
+        "__gt__" -> { return .bool(b: compareOp(it, .gt, o, args[0])) }
+        "__ge__" -> { return .bool(b: compareOp(it, .ge, o, args[0])) }
+        _ -> {}
+    }
+    var inner = name.substring(from: 2, to: name.count - 2)
+    var reflected = false
+    if inner.hasPrefix("r") && operatorOf(inner.substring(from: 1, to: inner.count)) != nil {
+        inner = inner.substring(from: 1, to: inner.count)
+        reflected = true
+    }
+    if let op = operatorOf(inner) {
+        return if reflected { binaryOp(it, op, args[0], o) } else { binaryOp(it, op, o, args[0]) }
+    }
+    nil
+}
+
+// ---- exec and eval in a namespace ----
+
+// exec(source, globals, locals) and eval(…): the code runs with the
+// dictionaries' entries as its variables, and what it sets goes back into
+// `locals` (or `globals`, if there's no `locals`).
+fn runSourceIn(_ it: bind Interp, _ source: String, _ asExpression: Bool, _ args: [Value]) -> Value {
+    var globals = -1
+    var locals = -1
+    if args.count > 1 {
+        match args[1] {
+            .dict(d) -> { globals = d }
+            .none -> {}
+            _ -> { return it.throw("TypeError", "{if asExpression { "eval" } else { "exec" }}() globals must be a dict, not {typeName(it, args[1])}") }
+        }
+    }
+    if args.count > 2 {
+        match args[2] {
+            .dict(d) -> { locals = d }
+            .none -> {}
+            _ -> { return it.throw("TypeError", "locals must be a mapping or None, not {typeName(it, args[2])}") }
+        }
+    }
+    if globals < 0 && locals < 0 {
+        return runSource(it, source, asExpression)
+    }
+    // (With `globals`, the program's own names are out of sight.)
+    let e = it.newEnv(if globals >= 0 { 0 } else { it.globalEnv() })
+    it.envs[e].captured = true
+    var before: [String: Value] = [:]
+    for d in [globals, locals] {
+        if d >= 0 {
+            let keys = dictKeys(it.dicts[d])
+            let values = dictValues(it.dicts[d])
+            for i in keys.indices {
+                match keys[i] {
+                    .str(s) -> {
+                        it.envs[e].vars[s] = values[i]
+                        before[s] = values[i]
+                    }
+                    _ -> {}
+                }
+            }
+        }
+    }
+    let savedEnv = it.env
+    let savedName = it.funcName
+    it.env = e
+    it.funcName = "<module>"
+    let result = runSource(it, source, asExpression)
+    it.env = savedEnv
+    it.funcName = savedName
+    // What it set, and what it deleted.
+    let target = if locals >= 0 { locals } else { globals }
+    for name in it.envs[e].vars.keys {
+        if let v = it.envs[e].vars[name] {
+            if before[name] != v {
+                dictSet(it.dicts[target], .str(s: name), "s" + name, v)
+            }
+        }
+    }
+    for (name, _) in before {
+        if !it.envs[e].vars.contains(key: name) {
+            dictRemove(it.dicts[target], "s" + name)
+        }
+    }
+    result
+}
+
+// ---- str ----
+
+// str.maketrans(x), (x, y) and (x, y, z): a table for `translate`.
+fn strMaketrans(_ it: bind Interp, _ args: [Value]) -> Value {
+    let table = it.newDict()
+    if args.count == 1 {
+        match args[0] {
+            .dict(d) -> {
+                let keys = dictKeys(it.dicts[d])
+                let values = dictValues(it.dicts[d])
+                for i in keys.indices {
+                    var key = keys[i]
+                    match keys[i] {
+                        .str(s) -> {
+                            if s.count != 1 {
+                                return it.throw("ValueError", "string keys in translate table must be of length 1")
+                            }
+                            key = .int(i: ordOf(s))
+                        }
+                        _ -> {}
+                    }
+                    let h = hashKey(it, key)
+                    if it.signal != .none {
+                        return Value.none
+                    }
+                    dictSet(it.dicts[table], key, h, values[i])
+                }
+                return .dict(id: table)
+            }
+            _ -> { return it.throw("TypeError", "if you give only one argument to maketrans it must be a dict") }
+        }
+    }
+    if args.count < 2 || args.count > 3 {
+        return it.throw("TypeError", "maketrans() takes at most 3 arguments ({args.count} given)")
+    }
+    var texts: [[Int]] = []
+    for a in args {
+        match a {
+            .str(s) -> { texts.append(codePoints(s)) }
+            _ -> { return it.throw("TypeError", "maketrans() argument {texts.count + 1} must be str, not {typeName(it, a)}") }
+        }
+    }
+    if texts[0].count != texts[1].count {
+        return it.throw("ValueError", "the first two maketrans arguments must have equal length")
+    }
+    for i in texts[0].indices {
+        dictSet(it.dicts[table], .int(i: texts[0][i]), "i{texts[0][i]}", .int(i: texts[1][i]))
+    }
+    if texts.count > 2 {
+        for c in texts[2] {
+            dictSet(it.dicts[table], .int(i: c), "i{c}", Value.none)
+        }
+    }
+    Value.dict(id: table)
+}
+
+// The methods of str that methods.tsl doesn't have. Nil if `name` isn't one.
+fn moreStrMethod(_ it: bind Interp, _ s: String, _ name: String, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value? {
+    match name {
+        "maketrans" -> { return strMaketrans(it, args) }
+        "expandtabs" -> {
+            var size = 8
+            if !args.isEmpty {
+                size = intOf(args[0]) ?? 8
+            }
+            match keyword(kwNames, kwValues, "tabsize") {
+                .int(i) -> { size = i }
+                _ -> {}
+            }
+            var out: [String] = []
+            var column = 0
+            for c in s.characters {
+                if c == "\t" {
+                    if size > 0 {
+                        let fill = size - column % size
+                        out.append(" ".repeated(fill))
+                        column += fill
+                    }
+                } else {
+                    out.append(c)
+                    column = if c == "\n" || c == "\r" { 0 } else { column + 1 }
+                }
+            }
+            return .str(s: out.joined())
+        }
+        "translate" -> {
+            if args.count != 1 {
+                return it.throw("TypeError", "str.translate() takes exactly one argument ({args.count} given)")
+            }
+            var out: [String] = []
+            for c in s.characters {
+                let code = Value.int(i: ordOf(c))
+                var mapped = Value.absent
+                match args[0] {
+                    .dict(d) -> { mapped = dictGet(it.dicts[d], "i{ordOf(c)}") }
+                    _ -> {
+                        mapped = getItem(it, args[0], code)
+                        if it.signal == .raising && exceptionMatches(it, it.exc, .klass(id: it.classIds["LookupError"] ?? -1)) {
+                            it.signal = .none
+                            it.exc = .none
+                            mapped = Value.absent
+                        }
+                        if it.signal != .none {
+                            return Value.none
+                        }
+                    }
+                }
+                match mapped {
+                    .absent -> { out.append(c) }
+                    .none -> {}
+                    .str(t) -> { out.append(t) }
+                    .int(i) -> {
+                        if i < 0 || i > 0x10FFFF {
+                            return it.throw("ValueError", "character mapping must be in range(0x110000)")
+                        }
+                        out.append(chrOf(i))
+                    }
+                    _ -> { return it.throw("TypeError", "character mapping must return integer, None or str") }
+                }
+            }
+            return .str(s: out.joined())
+        }
+        "splitlines" -> {
+            var keep = false
+            if !args.isEmpty {
+                keep = truthy(it, args[0])
+            }
+            let named = keyword(kwNames, kwValues, "keepends")
+            if named != Value.absent {
+                keep = truthy(it, named)
+            }
+            let c = s.characters
+            var out: [Value] = []
+            var line: [String] = []
+            var i = 0
+            while i < c.count {
+                let ch = c[i]
+                let code = ordOf(ch)
+                // (Tessel reads "\r\n" as one character.)
+                if ch == "\n" || ch == "\r" || ch == "\r\n" || code == 11 || code == 12 || code == 0x1c || code == 0x1d ||
+                   code == 0x1e || code == 0x85 || code == 0x2028 || code == 0x2029 {
+                    var end = ch
+                    if ch == "\r" && i + 1 < c.count && c[i + 1] == "\n" {
+                        end = "\r\n"
+                        i += 1
+                    }
+                    if keep {
+                        line.append(end)
+                    }
+                    out.append(.str(s: line.joined()))
+                    line = []
+                } else {
+                    line.append(ch)
+                }
+                i += 1
+            }
+            if !line.isEmpty {
+                out.append(.str(s: line.joined()))
+            }
+            return it.newList(out)
+        }
+        _ -> { return nil }
+    }
+}

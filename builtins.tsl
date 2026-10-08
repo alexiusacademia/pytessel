@@ -648,7 +648,13 @@ fn callBuiltin(_ it: bind Interp, _ name: String, _ args: [Value], _ kwNames: [S
             }
             Value.str(s: toStr(it, args[0]))
         }
-        "int" -> toInt(it, args)
+        "int" -> {
+            let base = keyword(kwNames, kwValues, "base")
+            if base != Value.absent && args.count == 1 {
+                return toInt(it, [args[0], base])
+            }
+            toInt(it, args)
+        }
         "bytes", "bytearray" -> makeBytes(it, name, args, kwNames, kwValues)
         "slice" -> makeSlice(it, args)
         "float" -> toFloat(it, args)
@@ -1360,7 +1366,7 @@ fn callBuiltin(_ it: bind Interp, _ name: String, _ args: [Value], _ kwNames: [S
                 return Value.none
             }
             match args[0] {
-                .str(source) -> runSource(it, source, true)
+                .str(source) -> runSourceIn(it, source, true, args)
                 _ -> it.throw("TypeError", "eval() arg 1 must be a string")
             }
         }
@@ -1369,7 +1375,7 @@ fn callBuiltin(_ it: bind Interp, _ name: String, _ args: [Value], _ kwNames: [S
                 return Value.none
             }
             match args[0] {
-                .str(source) -> runSource(it, source, false)
+                .str(source) -> runSourceIn(it, source, false, args)
                 _ -> it.throw("TypeError", "exec() arg 1 must be a string")
             }
         }
