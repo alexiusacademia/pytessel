@@ -28,6 +28,7 @@ fn isIterable(_ it: bind Interp, _ v: Value) -> Bool {
         .dict(_) -> true
         .set(_) -> true
         .range(_, _, _) -> true
+        .bytes(_, _) -> true
         .iterator(_) -> true
         .file(_) -> true
         .instance(id) -> {
@@ -52,6 +53,9 @@ fn getIter(_ it: bind Interp, _ v: Value) -> Value {
         .str(_) -> { return makeIter(it, PyIter(items: iterate(it, v), kind: "str_iterator")) }
         .dict(id) -> { return makeIter(it, PyIter(items: dictKeys(it.dicts[id]), kind: "dict_keyiterator")) }
         .set(id) -> { return makeIter(it, PyIter(items: dictKeys(it.dicts[id]), kind: "set_iterator")) }
+        .bytes(_, mutable) -> {
+            return makeIter(it, PyIter(items: iterate(it, v), kind: if mutable { "bytearray_iterator" } else { "bytes_iterator" }))
+        }
         .instance(id) -> {
             let cls = it.instances[id].cls
             let method = classAttr(it, cls, "__iter__")
@@ -175,6 +179,9 @@ fn nextValue(_ it: bind Interp, _ iterator: Value) -> Value {
             return v
         }
         .file(id) -> {
+            if it.files[id].binary {
+                return binaryLine(it, id)
+            }
             let at = it.files[id].pos
             if at < it.files[id].lines.count {
                 it.files[id].pos = at + 1

@@ -1506,6 +1506,18 @@ struct Parser {
         if k == .str || k == .fstr {
             return strings()
         }
+        if k == .bytes {
+            // b"…", or several next to each other.
+            var all: [Int] = []
+            while kind() == .bytes && error == "" {
+                all.appendAll(codePoints(text()))
+                advance()
+            }
+            if kind() == .str || kind() == .fstr {
+                fail("cannot mix bytes and nonbytes literals")
+            }
+            return add(.bytesLit(value: all), at)
+        }
         if k == .keyword {
             if t == "None" {
                 advance()

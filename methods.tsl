@@ -14,8 +14,18 @@ fn hasMethod(_ type: String, _ name: String) -> Bool {
                   "symmetric_difference", "update", "issubset", "issuperset", "isdisjoint",
                   "intersection_update", "difference_update"].contains(name)
         "tuple" -> ["count", "index"].contains(name)
-        "TextIOWrapper" -> ["read", "readline", "readlines", "write", "writelines", "close", "flush"].contains(name)
-        "int" -> ["bit_length", "is_integer", "conjugate"].contains(name)
+        "TextIOWrapper", "BufferedReader", "BufferedWriter" -> ["read", "readline", "readlines", "write", "writelines", "close", "flush"].contains(name)
+        "int" -> ["bit_length", "is_integer", "conjugate", "to_bytes", "from_bytes"].contains(name)
+        "bytes", "bytearray" -> {
+            if ["decode", "hex", "fromhex", "find", "rfind", "index", "rindex", "count", "startswith", "endswith", "split",
+                "rsplit", "splitlines", "partition", "rpartition", "join", "replace", "strip", "lstrip", "rstrip",
+                "removeprefix", "removesuffix", "upper", "lower", "swapcase", "capitalize", "isdigit", "isalpha",
+                "isalnum", "isspace", "isupper", "islower", "isascii", "zfill", "ljust", "rjust", "center"].contains(name) {
+                true
+            } else {
+                type == "bytearray" && ["append", "extend", "pop", "clear", "insert", "remove", "reverse", "copy"].contains(name)
+            }
+        }
         "float" -> ["is_integer", "conjugate"].contains(name)
         "bool" -> ["bit_length"].contains(name)
         "generator" -> ["send", "throw", "close", "__next__", "__iter__"].contains(name)
@@ -180,6 +190,7 @@ fn splitText(_ it: bind Interp, _ s: String, _ args: [Value], _ kwNames: [String
                 parts.append(rest)
             }
         }
+        .bytes(_, _) -> { return it.throw("TypeError", "must be str or None, not bytes") }
         _ -> {
             // No separator: the words between runs of spaces.
             if limit < 0 {
@@ -474,12 +485,12 @@ fn strMethod(_ it: bind Interp, _ s: String, _ name: String, _ args: [Value], _ 
             Value.none
         }
         "encode" -> {
-            // (PyTessel has no bytes type: the bytes' numbers, in a list.)
-            var out: [Value] = []
-            for b in Data(text: s).bytes {
-                out.append(.int(i: b))
+            if let codec = codecArgs(it, name, args, 0, kwNames, kwValues) {
+                if let b = encodeText(it, s, codec[0], codec[1]) {
+                    return it.newBytes(b, false)
+                }
             }
-            it.newList(out)
+            Value.none
         }
         _ -> it.throw("AttributeError", "'str' object has no attribute '{name}'")
     }
@@ -820,6 +831,11 @@ fn fileMethod(_ it: bind Interp, _ id: Int, _ receiver: Value, _ name: String, _
     if it.files[id].closed && name != "close" {
         return it.throw("ValueError", "I/O operation on closed file.")
     }
+    if it.files[id].binary {
+        if let result = binaryFileMethod(it, id, name, args) {
+            return result
+        }
+    }
     match name {
         "read" -> {
             let from = it.files[id].pos
@@ -837,6 +853,9 @@ fn fileMethod(_ it: bind Interp, _ id: Int, _ receiver: Value, _ name: String, _
         }
         "readlines" -> it.newList(iterate(it, receiver))
         "write" -> {
+            if args.count == 1 && typeName(it, args[0]) != "str" {
+                return it.throw("TypeError", "write() argument must be str, not {typeName(it, args[0])}")
+            }
             if let text = textArg(it, args, 0, name) {
                 if it.files[id].mode.contains("r") && !it.files[id].mode.contains("+") {
                     return it.throw("OSError", "not writable")
@@ -895,6 +914,12 @@ fn typeMethod(_ it: bind Interp, _ type: String, _ name: String, _ args: [Value]
             dictSet(it.dicts[id], k, h, if args.count > 1 { args[1] } else { Value.none })
         }
         return .dict(id: id)
+    }
+    if (type == "bytes" || type == "bytearray") && name == "fromhex" {
+        return bytesFromHex(it, args, type == "bytearray")
+    }
+    if type == "int" && name == "from_bytes" {
+        return intFromBytes(it, args, kwNames, kwValues)
     }
     if args.isEmpty {
         return it.throw("TypeError", "unbound method {type}.{name}() needs an argument")
@@ -959,6 +984,7 @@ fn callMethod(_ it: bind Interp, _ receiver: Value, _ name: String, _ args: [Val
             it.throw("AttributeError", "'tuple' object has no attribute '{name}'")
         }
         .file(id) -> fileMethod(it, id, receiver, name, args)
+        .bytes(id, mutable) -> bytesMethod(it, id, mutable, name, args, kwNames, kwValues)
         .iterator(id) -> {
             if name == "__next__" {
                 return callBuiltin(it, "next", [receiver], [], [])
@@ -994,6 +1020,12 @@ fn callMethod(_ it: bind Interp, _ receiver: Value, _ name: String, _ args: [Val
             }
             if name == "conjugate" {
                 return receiver
+            }
+            if name == "to_bytes" {
+                return intToBytes(it, i, args, kwNames, kwValues)
+            }
+            if name == "from_bytes" {
+                return intFromBytes(it, args, kwNames, kwValues)
             }
             let f = getAttr(it, receiver, name)
             if it.signal != .none {

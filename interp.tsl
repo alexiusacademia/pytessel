@@ -18,6 +18,7 @@ struct Interp {
     iterators: [PyIter] = []
     generators: [Generator] = []
     files: [PyFile] = []
+    blobs: [[Int]] = []
     cells: [Value] = []
     // The functions that set properties (`@x.setter`), by the property's cell.
     setters: [Int: Value] = [:]
@@ -103,6 +104,11 @@ struct Interp {
     fn newTuple(_ items: [Value]) -> Value {
         lists.append(items)
         Value.tuple(id: lists.count - 1)
+    }
+
+    fn newBytes(_ bytes: [Int], _ mutable: Bool) -> Value {
+        blobs.append(bytes)
+        Value.bytes(id: blobs.count - 1, mutable: mutable)
     }
 
     fn newDict() -> Int {
@@ -229,6 +235,7 @@ struct Interp {
             .intLit(v) -> .int(i: v)
             .floatLit(v) -> .float(f: v)
             .strLit(v) -> .str(s: v)
+            .bytesLit(v) -> newBytes(v, false)
             .noneLit -> .none
             .trueLit -> .bool(b: true)
             .falseLit -> .bool(b: false)
@@ -1549,7 +1556,7 @@ struct Interp {
                             return
                         }
                         line = prog.lines[target]
-                        setSlice(self, o, lo, hi, st, newList([]))
+                        deleteSlice(self, o, lo, hi, st)
                         return
                     }
                     _ -> {}

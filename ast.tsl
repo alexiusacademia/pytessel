@@ -16,6 +16,8 @@ enum Node {
     intLit(value: Int)
     floatLit(value: Float)
     strLit(value: String)
+    // b"…": its bytes.
+    bytesLit(value: [Int])
     name(id: String)
     binary(op: BinOp, left: Int, right: Int)
     unary(op: UnOp, operand: Int)

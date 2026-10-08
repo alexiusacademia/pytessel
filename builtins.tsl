@@ -38,6 +38,7 @@ fn lengthOf(_ it: bind Interp, _ v: Value) -> Value {
         .tuple(id) -> .int(i: it.lists[id].count)
         .set(id) -> .int(i: it.dicts[id].live)
         .range(start, stop, step) -> .int(i: rangeLength(start, stop, step))
+        .bytes(id, _) -> .int(i: it.blobs[id].count)
         .instance(id) -> {
             let method = classAttr(it, it.instances[id].cls, "__len__")
             if method != Value.absent {
@@ -237,6 +238,19 @@ fn toInt(_ it: bind Interp, _ args: [Value]) -> Value {
                 base = intOf(args[1]) ?? 10
             }
             parseInteger(it, s, base)
+        }
+        .bytes(id, _) -> {
+            // int(b"42"): the digits, as text.
+            var base = 10
+            if args.count > 1 {
+                base = intOf(args[1]) ?? 10
+            }
+            let parsed = parseInteger(it, Data(bytes: it.blobs[id]).text ?? "?", base)
+            if it.signal == .raising && it.blobs[id].count < 200 {
+                it.signal = .none
+                return it.throw("ValueError", "invalid literal for int() with base {base}: {toRepr(it, v)}")
+            }
+            parsed
         }
         .instance(id) -> {
             let method = classAttr(it, it.instances[id].cls, "__int__")
@@ -476,6 +490,25 @@ fn openPath(_ it: bind Interp, _ args: [Value], _ kwNames: [String], _ kwValues:
         _ -> {}
     }
     var file = PyFile(path: path, mode: mode)
+    if mode.contains("b") {
+        // A file of bytes.
+        file.binary = true
+        if mode.contains("r") {
+            if let data = readData(path) {
+                file.data = data.bytes
+            } else {
+                return it.throw("FileNotFoundError", "[Errno 2] No such file or directory: {strRepr(path)}")
+            }
+        } else if mode.contains("w") {
+            if !writeData(path: path, data: Data()) {
+                return it.throw("OSError", "can't write {strRepr(path)}")
+            }
+        } else if !mode.contains("a") && !mode.contains("x") {
+            return it.throw("ValueError", "invalid mode: {strRepr(mode)}")
+        }
+        it.files.append(file)
+        return Value.file(id: it.files.count - 1)
+    }
     if mode.contains("r") {
         if let text = readFile(path: path) {
             // Each line with its line break, as Python gives them.
@@ -505,6 +538,13 @@ fn openPath(_ it: bind Interp, _ args: [Value], _ kwNames: [String], _ kwValues:
 
 // Writes what a file has waiting.
 fn flushFile(_ it: bind Interp, _ id: Int) {
+    if it.files[id].binary {
+        if !it.files[id].mode.contains("r") && !it.files[id].data.isEmpty {
+            appendData(path: it.files[id].path, data: Data(bytes: it.files[id].data))
+            it.files[id].data = []
+        }
+        return
+    }
     if it.files[id].pending != "" {
         appendFile(path: it.files[id].path, text: it.files[id].pending)
         it.files[id].pending = ""
@@ -584,9 +624,20 @@ fn callBuiltin(_ it: bind Interp, _ name: String, _ args: [Value], _ kwNames: [S
             if args.isEmpty {
                 return .str(s: "")
             }
+            if args.count > 1 || !kwNames.isEmpty {
+                // str(b"…", "utf-8"): bytes, decoded.
+                if let codec = codecArgs(it, name, args, 1, kwNames, kwValues) {
+                    if let b = bytesOf(it, args[0]) {
+                        return decodeBytes(it, b, codec[0], codec[1])
+                    }
+                    return it.throw("TypeError", "decoding to str: need a bytes-like object, {typeName(it, args[0])} found")
+                }
+                return Value.none
+            }
             Value.str(s: toStr(it, args[0]))
         }
         "int" -> toInt(it, args)
+        "bytes", "bytearray" -> makeBytes(it, name, args, kwNames, kwValues)
         "float" -> toFloat(it, args)
         "isinstance" -> {
             if !arity(it, name, args, 2, 2) {
@@ -895,6 +946,12 @@ fn callBuiltin(_ it: bind Interp, _ name: String, _ args: [Value], _ kwNames: [S
                         return it.throw("TypeError", "ord() expected a character, but string of length {s.count} found")
                     }
                     Value.int(i: ordOf(s))
+                }
+                .bytes(id, _) -> {
+                    if it.blobs[id].count != 1 {
+                        return it.throw("TypeError", "ord() expected a character, but string of length {it.blobs[id].count} found")
+                    }
+                    Value.int(i: it.blobs[id][0])
                 }
                 _ -> it.throw("TypeError", "ord() expected string of length 1, but {typeName(it, args[0])} found")
             }
@@ -1295,6 +1352,7 @@ fn snapshot(_ it: bind Interp, _ e: Int) -> Value {
 // The names every program starts with.
 fn builtinNames() -> [String] {
     ["len", "range", "print", "str", "int", "float", "isinstance", "bool", "list", "tuple", "dict", "set", "frozenset",
+     "bytes", "bytearray",
      "abs", "min", "max", "sum", "sorted", "enumerate", "zip", "map", "filter", "reversed", "any", "all", "repr",
      "ascii", "type", "issubclass", "input", "ord", "chr", "round", "divmod", "pow", "hex", "bin", "oct", "callable",
      "getattr", "hasattr", "setattr", "delattr", "iter", "next", "open", "super", "staticmethod", "classmethod",
@@ -1314,5 +1372,6 @@ fn exceptionClasses() -> [(String, String)] {
      ("RuntimeError", "Exception"), ("NotImplementedError", "RuntimeError"), ("RecursionError", "RuntimeError"),
      ("TimeoutError", "OSError"),
      ("StopIteration", "Exception"), ("SyntaxError", "Exception"), ("TypeError", "Exception"),
-     ("ValueError", "Exception"), ("UnicodeError", "ValueError")]
+     ("ValueError", "Exception"), ("UnicodeError", "ValueError"), ("UnicodeDecodeError", "UnicodeError"),
+     ("UnicodeEncodeError", "UnicodeError"), ("MemoryError", "Exception"), ("UnsupportedOperation", "OSError")]
 }

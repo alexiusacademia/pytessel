@@ -47,7 +47,7 @@ fn mulChecked(_ a: Int, _ b: Int) -> Int? {
 // The names of the built-in types (which are also functions: `int("5")`).
 fn isTypeName(_ name: String) -> Bool {
     match name {
-        "int", "float", "str", "bool", "list", "tuple", "dict", "set", "range", "object", "type", "bytes", "frozenset" -> true
+        "int", "float", "str", "bool", "list", "tuple", "dict", "set", "range", "object", "type", "bytes", "frozenset", "bytearray" -> true
         _ -> false
     }
 }
@@ -71,7 +71,16 @@ fn typeName(_ it: bind Interp, _ v: Value) -> String {
         .range(_, _, _) -> "range"
         .module(_) -> "module"
         .iterator(id) -> it.iterators[id].kind
-        .file(_) -> "TextIOWrapper"
+        .file(id) -> {
+            if !it.files[id].binary {
+                "TextIOWrapper"
+            } else if it.files[id].mode.contains("r") {
+                "BufferedReader"
+            } else {
+                "BufferedWriter"
+            }
+        }
+        .bytes(_, mutable) -> bytesTypeName(mutable)
         .wrapper(kind, _) -> if kind == 0 { "staticmethod" } else if kind == 1 { "classmethod" } else { "property" }
         .superRef(_, _) -> "super"
         .absent -> "?"
@@ -226,6 +235,7 @@ fn truthy(_ it: bind Interp, _ v: Value) -> Bool {
         .dict(id) -> it.dicts[id].live > 0
         .set(id) -> it.dicts[id].live > 0
         .range(start, stop, step) -> (step > 0 && start < stop) || (step < 0 && start > stop)
+        .bytes(id, _) -> !it.blobs[id].isEmpty
         .instance(id) -> {
             let cls = it.instances[id].cls
             let asBool = classAttr(it, cls, "__bool__")
@@ -401,7 +411,14 @@ fn toRepr(_ it: bind Interp, _ v: Value) -> String {
             }
             "<{p.kind} object at 0x{intInBase(4391000000 + id * 208, base: 16, prefix: "")}>"
         }
-        .file(id) -> "<_io.TextIOWrapper name={strRepr(it.files[id].path)} mode={strRepr(it.files[id].mode)}>"
+        .file(id) -> {
+            if it.files[id].binary {
+                "<_io.{typeName(it, v)} name={strRepr(it.files[id].path)}>"
+            } else {
+                "<_io.TextIOWrapper name={strRepr(it.files[id].path)} mode={strRepr(it.files[id].mode)} encoding='UTF-8'>"
+            }
+        }
+        .bytes(id, mutable) -> if mutable { "bytearray(" + bytesRepr(it.blobs[id]) + ")" } else { bytesRepr(it.blobs[id]) }
         .wrapper(kind, _) -> if kind == 0 { "<staticmethod object>" } else if kind == 1 { "<classmethod object>" } else { "<property object>" }
         .superRef(_, _) -> "<super object>"
         .absent -> "<absent>"
@@ -462,6 +479,12 @@ fn pyEquals(_ it: bind Interp, _ a: Value, _ b: Value) -> Bool {
         .set(x) -> {
             match b {
                 .set(y) -> x == y || dictsEqual(it, x, y, false)
+                _ -> reflectedEquals(it, a, b)
+            }
+        }
+        .bytes(x, _) -> {
+            match b {
+                .bytes(y, _) -> x == y || it.blobs[x] == it.blobs[y]
                 _ -> reflectedEquals(it, a, b)
             }
         }
@@ -571,6 +594,12 @@ fn pyLess(_ it: bind Interp, _ a: Value, _ b: Value, _ symbol: String) -> Bool {
             match b {
                 // (A set is "less" when it's a part of the other.)
                 .set(y) -> { return it.dicts[x].live < it.dicts[y].live && isSubset(it, x, y) }
+                _ -> {}
+            }
+        }
+        .bytes(x, _) -> {
+            match b {
+                .bytes(y, _) -> { return bytesLess(it.blobs[x], it.blobs[y]) }
                 _ -> {}
             }
         }
@@ -713,6 +742,7 @@ fn contains(_ it: bind Interp, _ container: Value, _ item: Value) -> Bool {
         }
         .list(id) -> listContains(it, it.lists[id], item)
         .tuple(id) -> listContains(it, it.lists[id], item)
+        .bytes(id, _) -> bytesContains(it, id, item)
         .dict(id) -> {
             let h = hashKey(it, item)
             if it.signal != .none {
@@ -815,6 +845,13 @@ fn hashKey(_ it: bind Interp, _ v: Value) -> String {
         .range(start, stop, step) -> "r{start},{stop},{step}"
         .bound(id) -> "m{id}"
         .module(name) -> "M" + name
+        .bytes(id, mutable) -> {
+            if mutable {
+                it.throw("TypeError", "unhashable type: 'bytearray'")
+                return ""
+            }
+            "y" + Data(bytes: it.blobs[id]).hex
+        }
         _ -> {
             it.throw("TypeError", "unhashable type: '{typeName(it, v)}'")
             ""
@@ -1190,6 +1227,11 @@ fn binaryOp(_ it: bind Interp, _ op: BinOp, _ a: Value, _ b: Value) -> Value {
                 _ -> {}
             }
         }
+        .bytes(x, mutable) -> {
+            if let r = bytesOp(it, op, x, mutable, b) {
+                return r
+            }
+        }
         .dict(x) -> {
             match b {
                 .dict(_) -> {
@@ -1218,6 +1260,7 @@ fn binaryOp(_ it: bind Interp, _ op: BinOp, _ a: Value, _ b: Value) -> Value {
                 .str(y) -> { return .str(s: if n > 0 { y.repeated(n) } else { "" }) }
                 .list(y) -> { return it.newList(repeatList(it.lists[y], n)) }
                 .tuple(y) -> { return it.newTuple(repeatList(it.lists[y], n)) }
+                .bytes(y, mutable) -> { return it.newBytes(repeatBytes(it.blobs[y], n), mutable) }
                 _ -> {}
             }
         }
@@ -1250,6 +1293,21 @@ fn inPlaceOp(_ it: bind Interp, _ op: BinOp, _ a: Value, _ b: Value) -> Value {
             if op == .mul {
                 if let n = intOf(b) {
                     it.lists[id] = repeatList(it.lists[id], n)
+                    return a
+                }
+            }
+        }
+        .bytes(id, mutable) -> {
+            // A bytearray grows where it is.
+            if mutable && op == .add {
+                if let more = bytesOf(it, b) {
+                    it.blobs[id].appendAll(more)
+                    return a
+                }
+            }
+            if mutable && op == .mul {
+                if let n = intOf(b) {
+                    it.blobs[id] = repeatBytes(it.blobs[id], n)
                     return a
                 }
             }
@@ -1326,6 +1384,13 @@ fn iterate(_ it: bind Interp, _ v: Value) -> [Value] {
         }
         .dict(id) -> dictKeys(it.dicts[id])
         .set(id) -> dictKeys(it.dicts[id])
+        .bytes(id, _) -> {
+            var out: [Value] = []
+            for b in it.blobs[id] {
+                out.append(.int(i: b))
+            }
+            out
+        }
         .range(start, stop, step) -> {
             var out: [Value] = []
             var i = start
@@ -1350,6 +1415,16 @@ fn iterate(_ it: bind Interp, _ v: Value) -> [Value] {
         }
         .file(id) -> {
             var out: [Value] = []
+            if it.files[id].binary {
+                while true {
+                    let line = binaryLine(it, id)
+                    if isAbsent(line) {
+                        break
+                    }
+                    out.append(line)
+                }
+                return out
+            }
             let from = it.files[id].pos
             for i in from..it.files[id].lines.count {
                 out.append(.str(s: it.files[id].lines[i]))
@@ -1442,6 +1517,7 @@ fn getItem(_ it: bind Interp, _ o: Value, _ index: Value) -> Value {
             }
             it.throw("TypeError", "range indices must be integers or slices, not {typeName(it, index)}")
         }
+        .bytes(id, mutable) -> bytesItem(it, id, mutable, index)
         .instance(id) -> {
             let method = classAttr(it, it.instances[id].cls, "__getitem__")
             if method != Value.absent {
@@ -1548,6 +1624,14 @@ fn getSlice(_ it: bind Interp, _ o: Value, _ lower: Int?, _ upper: Int?, _ step:
             }
             Value.str(s: out)
         }
+        .bytes(id, mutable) -> {
+            let at = sliceIndices(it, it.blobs[id].count, lower, upper, step)
+            var out: [Int] = []
+            for i in at {
+                out.append(it.blobs[id][i])
+            }
+            it.newBytes(out, mutable)
+        }
         .range(start, stop, step0) -> {
             let at = sliceIndices(it, rangeLength(start, stop, step0), lower, upper, step)
             var out: [Value] = []
@@ -1579,6 +1663,7 @@ fn setItem(_ it: bind Interp, _ o: Value, _ index: Value, _ v: Value) {
                 dictSet(it.dicts[id], index, h, v)
             }
         }
+        .bytes(id, mutable) -> bytesSetItem(it, id, mutable, index, v)
         .instance(id) -> {
             let method = classAttr(it, it.instances[id].cls, "__setitem__")
             if method != Value.absent {
@@ -1641,8 +1726,37 @@ fn setSlice(_ it: bind Interp, _ o: Value, _ lower: Int?, _ upper: Int?, _ step:
                 it.lists[id][at[k]] = replacement[k]
             }
         }
+        .bytes(id, mutable) -> bytesSetSlice(it, id, mutable, lower, upper, step, v, false)
         _ -> {
             it.throw("TypeError", "'{typeName(it, o)}' object does not support slice assignment")
+        }
+    }
+}
+
+// del o[lower:upper:step].
+fn deleteSlice(_ it: bind Interp, _ o: Value, _ lower: Int?, _ upper: Int?, _ step: Int?) {
+    match o {
+        .bytes(id, mutable) -> bytesSetSlice(it, id, mutable, lower, upper, step, Value.none, true)
+        .list(id) -> {
+            let count = it.lists[id].count
+            let at = sliceIndices(it, count, lower, upper, step)
+            if it.signal != .none || at.isEmpty {
+                return
+            }
+            var gone: Set<Int> = []
+            for i in at {
+                gone.insert(i)
+            }
+            var out: [Value] = []
+            for i in 0..count {
+                if !gone.contains(i) {
+                    out.append(it.lists[id][i])
+                }
+            }
+            it.lists[id] = out
+        }
+        _ -> {
+            it.throw("TypeError", "'{typeName(it, o)}' object does not support item deletion")
         }
     }
 }
@@ -1669,6 +1783,7 @@ fn deleteItem(_ it: bind Interp, _ o: Value, _ index: Value) {
                 throwValue(it, "KeyError", index)
             }
         }
+        .bytes(id, mutable) -> bytesDeleteItem(it, id, mutable, index)
         .instance(id) -> {
             let method = classAttr(it, it.instances[id].cls, "__delitem__")
             if method != Value.absent {

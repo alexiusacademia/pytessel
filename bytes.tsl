@@ -1,0 +1,1517 @@
+// `bytes` and `bytearray`: their text forms, the codecs between them and
+// `str` (utf-8, ascii, latin-1), their methods, and files of bytes.
+//
+// A value's bytes are a list of numbers, 0 to 255, in `Interp.blobs`.
+
+// ---- text and code points ----
+
+// The code points of a text's characters.
+fn codePoints(_ s: String) -> [Int] {
+    let b = Data(text: s).bytes
+    var out: [Int] = []
+    var i = 0
+    while i < b.count {
+        let first = b[i]
+        if first < 0x80 {
+            out.append(first)
+            i += 1
+        } else if first < 0xE0 && i + 1 < b.count {
+            out.append(((first & 0x1F) << 6) | (b[i + 1] & 0x3F))
+            i += 2
+        } else if first < 0xF0 && i + 2 < b.count {
+            out.append(((first & 0x0F) << 12) | ((b[i + 1] & 0x3F) << 6) | (b[i + 2] & 0x3F))
+            i += 3
+        } else if i + 3 < b.count {
+            out.append(((first & 0x07) << 18) | ((b[i + 1] & 0x3F) << 12) | ((b[i + 2] & 0x3F) << 6) | (b[i + 3] & 0x3F))
+            i += 4
+        } else {
+            out.append(first)
+            i += 1
+        }
+    }
+    out
+}
+
+// A code point's bytes in UTF-8, added to `out`.
+fn appendUtf8(_ code: Int, _ out: bind [Int]) {
+    if code < 0x80 {
+        out.append(code)
+    } else if code < 0x800 {
+        out.append(0xC0 | (code >> 6))
+        out.append(0x80 | (code & 0x3F))
+    } else if code < 0x10000 {
+        out.append(0xE0 | (code >> 12))
+        out.append(0x80 | ((code >> 6) & 0x3F))
+        out.append(0x80 | (code & 0x3F))
+    } else {
+        out.append(0xF0 | (code >> 18))
+        out.append(0x80 | ((code >> 12) & 0x3F))
+        out.append(0x80 | ((code >> 6) & 0x3F))
+        out.append(0x80 | (code & 0x3F))
+    }
+}
+
+fn hexByte(_ b: Int) -> String {
+    let digits = "0123456789abcdef".characters
+    digits[(b >> 4) & 15] + digits[b & 15]
+}
+
+// Bytes as Python writes them: b'abc\n\xff'.
+fn bytesRepr(_ b: [Int]) -> String {
+    var hasSingle = false
+    var hasDouble = false
+    for x in b {
+        if x == 39 {
+            hasSingle = true
+        } else if x == 34 {
+            hasDouble = true
+        }
+    }
+    let quote = if hasSingle && !hasDouble { 34 } else { 39 }
+    var parts: [String] = ["b", chrOf(quote)]
+    for x in b {
+        if x == 92 {
+            parts.append("\\\\")
+        } else if x == quote {
+            parts.append("\\" + chrOf(quote))
+        } else if x == 9 {
+            parts.append("\\t")
+        } else if x == 10 {
+            parts.append("\\n")
+        } else if x == 13 {
+            parts.append("\\r")
+        } else if x >= 32 && x < 127 {
+            parts.append(chrOf(x))
+        } else {
+            parts.append("\\x" + hexByte(x))
+        }
+    }
+    parts.append(chrOf(quote))
+    parts.joined()
+}
+
+fn bytesTypeName(_ mutable: Bool) -> String {
+    if mutable { "bytearray" } else { "bytes" }
+}
+
+// The bytes of a bytes or bytearray value; nil for anything else.
+fn bytesOf(_ it: bind Interp, _ v: Value) -> [Int]? {
+    match v {
+        .bytes(id, _) -> { return it.blobs[id] }
+        _ -> { return nil }
+    }
+}
+
+// The same, raising a TypeError for anything else.
+fn needBytes(_ it: bind Interp, _ v: Value) -> [Int]? {
+    if let b = bytesOf(it, v) {
+        return b
+    }
+    it.throw("TypeError", "a bytes-like object is required, not '{typeName(it, v)}'")
+    nil
+}
+
+// ---- codecs ----
+
+// An encoding's name as PyTessel knows it: "utf-8", "ascii", "latin-1"
+// ("" for one it doesn't have).
+fn encodingName(_ name: String) -> String {
+    let n = name.lowercase().replace("_", with: "-")
+    match n {
+        "utf-8", "utf8", "u8", "utf" -> "utf-8"
+        "ascii", "us-ascii", "646" -> "ascii"
+        "latin-1", "latin1", "iso-8859-1", "iso8859-1", "l1", "latin" -> "latin-1"
+        _ -> ""
+    }
+}
+
+// How a character is written in a codec's error message: '\xe9', '€'.
+fn escapedChar(_ code: Int) -> String {
+    if code < 256 {
+        return "\\x" + hexByte(code)
+    }
+    if code < 65536 {
+        return "\\u" + hexByte(code >> 8) + hexByte(code & 255)
+    }
+    "\\U00" + hexByte(code >> 16) + hexByte((code >> 8) & 255) + hexByte(code & 255)
+}
+
+// The encoding and the way with errors a call names, by position (from
+// argument `at` on) or by keyword. Nil (with an exception) if they're wrong.
+fn codecArgs(_ it: bind Interp, _ method: String, _ args: [Value], _ at: Int, _ kwNames: [String], _ kwValues: [Value]) -> [String]? {
+    var encoding = Value.absent
+    var errors = Value.absent
+    if args.count > at {
+        encoding = args[at]
+    }
+    if args.count > at + 1 {
+        errors = args[at + 1]
+    }
+    let namedEncoding = keyword(kwNames, kwValues, "encoding")
+    if namedEncoding != Value.absent {
+        encoding = namedEncoding
+    }
+    let namedErrors = keyword(kwNames, kwValues, "errors")
+    if namedErrors != Value.absent {
+        errors = namedErrors
+    }
+    var out = ["utf-8", "strict"]
+    match encoding {
+        .absent -> {}
+        .str(s) -> {
+            out[0] = encodingName(s)
+            if out[0] == "" {
+                it.throw("LookupError", "unknown encoding: {s}")
+                return nil
+            }
+        }
+        _ -> {
+            it.throw("TypeError", "{method}() argument 'encoding' must be str, not {typeName(it, encoding)}")
+            return nil
+        }
+    }
+    match errors {
+        .absent -> {}
+        .str(s) -> { out[1] = s }
+        _ -> {
+            it.throw("TypeError", "{method}() argument 'errors' must be str, not {typeName(it, errors)}")
+            return nil
+        }
+    }
+    out
+}
+
+// text.encode(encoding, errors): the text's bytes.
+fn encodeText(_ it: bind Interp, _ s: String, _ encoding: String, _ errors: String) -> [Int]? {
+    if encoding == "utf-8" {
+        return Data(text: s).bytes
+    }
+    let limit = if encoding == "ascii" { 128 } else { 256 }
+    let points = codePoints(s)
+    var out: [Int] = []
+    var i = 0
+    while i < points.count {
+        if points[i] < limit {
+            out.append(points[i])
+            i += 1
+            continue
+        }
+        // The characters from here on that don't fit.
+        var end = i + 1
+        while end < points.count && points[end] >= limit {
+            end += 1
+        }
+        if errors == "strict" {
+            let what = if end == i + 1 {
+                "character '{escapedChar(points[i])}' in position {i}"
+            } else {
+                "characters in position {i}-{end - 1}"
+            }
+            it.throw("UnicodeEncodeError", "'{encoding}' codec can't encode {what}: ordinal not in range({limit})")
+            return nil
+        }
+        if errors == "replace" {
+            for _ in i..end {
+                out.append(63)
+            }
+        } else if errors != "ignore" {
+            it.throw("LookupError", "unknown error handler name '{errors}'")
+            return nil
+        }
+        i = end
+    }
+    out
+}
+
+// The code points of bytes read as UTF-8. Bytes that aren't UTF-8 raise
+// UnicodeDecodeError, are left out, or become U+FFFD, as `errors` says.
+fn decodeUtf8(_ it: bind Interp, _ b: [Int], _ errors: String) -> [Int]? {
+    var out: [Int] = []
+    let n = b.count
+    var i = 0
+    while i < n {
+        let c = b[i]
+        if c < 0x80 {
+            out.append(c)
+            i += 1
+            continue
+        }
+        var need = 0
+        if c >= 0xC2 && c <= 0xDF {
+            need = 1
+        } else if c >= 0xE0 && c <= 0xEF {
+            need = 2
+        } else if c >= 0xF0 && c <= 0xF4 {
+            need = 3
+        }
+        var reason = ""
+        // The bytes from `i` up to `end` are what's wrong.
+        var end = i + 1
+        if need == 0 {
+            reason = "invalid start byte"
+        } else {
+            var code = if need == 1 { c & 0x1F } else if need == 2 { c & 0x0F } else { c & 0x07 }
+            var k = 1
+            while k <= need {
+                if i + k >= n {
+                    reason = "unexpected end of data"
+                    end = n
+                    break
+                }
+                let x = b[i + k]
+                var low = 0x80
+                var high = 0xBF
+                if k == 1 {
+                    if c == 0xE0 {
+                        low = 0xA0
+                    } else if c == 0xED {
+                        high = 0x9F
+                    } else if c == 0xF0 {
+                        low = 0x90
+                    } else if c == 0xF4 {
+                        high = 0x8F
+                    }
+                }
+                if x < low || x > high {
+                    reason = "invalid continuation byte"
+                    end = i + k
+                    break
+                }
+                code = (code << 6) | (x & 0x3F)
+                k += 1
+            }
+            if reason == "" {
+                out.append(code)
+                i += need + 1
+                continue
+            }
+        }
+        if errors == "strict" {
+            let what = if end == i + 1 { "byte 0x{hexByte(c)} in position {i}" } else { "bytes in position {i}-{end - 1}" }
+            it.throw("UnicodeDecodeError", "'utf-8' codec can't decode {what}: {reason}")
+            return nil
+        }
+        if errors == "replace" {
+            out.append(0xFFFD)
+        } else if errors != "ignore" {
+            it.throw("LookupError", "unknown error handler name '{errors}'")
+            return nil
+        }
+        i = end
+    }
+    out
+}
+
+// bytes.decode(encoding, errors): the text the bytes are.
+fn decodeBytes(_ it: bind Interp, _ b: [Int], _ encoding: String, _ errors: String) -> Value {
+    var points: [Int] = []
+    if encoding == "utf-8" {
+        // (Plain ASCII, the common case, needs no looking into.)
+        var plain = true
+        for x in b {
+            if x >= 0x80 {
+                plain = false
+                break
+            }
+        }
+        if plain {
+            return .str(s: Data(bytes: b).text ?? "")
+        }
+        if let decoded = decodeUtf8(it, b, errors) {
+            points = decoded
+        } else {
+            return Value.none
+        }
+    } else if encoding == "ascii" {
+        for i in b.indices {
+            if b[i] < 128 {
+                points.append(b[i])
+            } else if errors == "strict" {
+                return it.throw("UnicodeDecodeError", "'ascii' codec can't decode byte 0x{hexByte(b[i])} in position {i}: ordinal not in range(128)")
+            } else if errors == "replace" {
+                points.append(0xFFFD)
+            } else if errors != "ignore" {
+                return it.throw("LookupError", "unknown error handler name '{errors}'")
+            }
+        }
+    } else {
+        points = b
+    }
+    var utf8: [Int] = []
+    for p in points {
+        appendUtf8(p, utf8)
+    }
+    Value.str(s: Data(bytes: utf8).text ?? "")
+}
+
+// ---- making them ----
+
+// The bytes an iterable of whole numbers gives.
+fn byteItems(_ it: bind Interp, _ v: Value, _ what: String) -> [Int]? {
+    let items = iterate(it, v)
+    if it.signal != .none {
+        return nil
+    }
+    var out: [Int] = []
+    for item in items {
+        if let i = intOf(item) {
+            if i < 0 || i > 255 {
+                it.throw("ValueError", "{what} must be in range(0, 256)")
+                return nil
+            }
+            out.append(i)
+        } else {
+            it.throw("TypeError", "'{typeName(it, item)}' object cannot be interpreted as an integer")
+            return nil
+        }
+    }
+    out
+}
+
+// bytes(…) and bytearray(…).
+fn makeBytes(_ it: bind Interp, _ name: String, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
+    let mutable = name == "bytearray"
+    if args.count > 3 {
+        return it.throw("TypeError", "{name}() takes at most 3 arguments ({args.count} given)")
+    }
+    var source = Value.absent
+    if !args.isEmpty {
+        source = args[0]
+    }
+    let named = keyword(kwNames, kwValues, "source")
+    if named != Value.absent {
+        source = named
+    }
+    let coded = args.count > 1 || keyword(kwNames, kwValues, "encoding") != Value.absent ||
+        keyword(kwNames, kwValues, "errors") != Value.absent
+    match source {
+        .absent -> {
+            if coded {
+                return it.throw("TypeError", "encoding or errors without sequence argument")
+            }
+            return it.newBytes([], mutable)
+        }
+        .str(s) -> {
+            if !coded {
+                return it.throw("TypeError", "string argument without an encoding")
+            }
+            if let codec = codecArgs(it, name, args, 1, kwNames, kwValues) {
+                if let b = encodeText(it, s, codec[0], codec[1]) {
+                    return it.newBytes(b, mutable)
+                }
+            }
+            return Value.none
+        }
+        _ -> {}
+    }
+    if coded {
+        return it.throw("TypeError", "encoding without a string argument")
+    }
+    match source {
+        .bytes(id, _) -> { return it.newBytes(it.blobs[id], mutable) }
+        .int(n) -> {
+            if n < 0 {
+                return it.throw("ValueError", "negative count")
+            }
+            if n > 100000000 {
+                return it.throw("MemoryError", "")
+            }
+            var zeros: [Int] = []
+            for _ in 0..n {
+                zeros.append(0)
+            }
+            return it.newBytes(zeros, mutable)
+        }
+        .bool(_) -> {}
+        .instance(id) -> {
+            let method = classAttr(it, it.instances[id].cls, "__bytes__")
+            if method != Value.absent && !mutable {
+                let made = it.callValue(method, [source], [], [])
+                if it.signal != .none {
+                    return Value.none
+                }
+                if bytesOf(it, made) == nil {
+                    return it.throw("TypeError", "__bytes__ returned non-bytes (type {typeName(it, made)})")
+                }
+                return made
+            }
+        }
+        _ -> {}
+    }
+    if !isIterable(it, source) {
+        return it.throw("TypeError", "cannot convert '{typeName(it, source)}' object to {name}")
+    }
+    if let b = byteItems(it, source, if mutable { "byte" } else { "bytes" }) {
+        return it.newBytes(b, mutable)
+    }
+    Value.none
+}
+
+// bytes.fromhex("00 ff").
+fn bytesFromHex(_ it: bind Interp, _ args: [Value], _ mutable: Bool) -> Value {
+    if args.count != 1 {
+        return it.throw("TypeError", "fromhex() takes exactly one argument ({args.count} given)")
+    }
+    match args[0] {
+        .str(s) -> {
+            let c = s.characters
+            var out: [Int] = []
+            var i = 0
+            while i < c.count {
+                if isSpace(c[i]) {
+                    i += 1
+                    continue
+                }
+                if !isHexChar(c[i]) || c[i].count != 1 {
+                    return it.throw("ValueError", "non-hexadecimal number found in fromhex() arg at position {i}")
+                }
+                if i + 1 >= c.count || !isHexChar(c[i + 1]) {
+                    return it.throw("ValueError", "non-hexadecimal number found in fromhex() arg at position {i + 1}")
+                }
+                out.append(hexValue(c[i] + c[i + 1]))
+                i += 2
+            }
+            it.newBytes(out, mutable)
+        }
+        _ -> it.throw("TypeError", "fromhex() argument must be str, not {typeName(it, args[0])}")
+    }
+}
+
+// ---- operators ----
+
+fn bytesLess(_ a: [Int], _ b: [Int]) -> Bool {
+    let shared = if a.count < b.count { a.count } else { b.count }
+    for i in 0..shared {
+        if a[i] != b[i] {
+            return a[i] < b[i]
+        }
+    }
+    a.count < b.count
+}
+
+// The first place `needle` is in `hay` between `from` and `to` (-1 if none);
+// `backwards` for the last place.
+fn findBytes(_ hay: [Int], _ needle: [Int], _ from: Int, _ to: Int, _ backwards: Bool) -> Int {
+    let m = needle.count
+    if to - from < m {
+        return -1
+    }
+    var i = if backwards { to - m } else { from }
+    while i >= from && i + m <= to {
+        var same = true
+        for k in 0..m {
+            if hay[i + k] != needle[k] {
+                same = false
+                break
+            }
+        }
+        if same {
+            return i
+        }
+        i += if backwards { -1 } else { 1 }
+    }
+    -1
+}
+
+// item in bytes: a number that's one of them, or bytes that are part of them.
+fn bytesContains(_ it: bind Interp, _ id: Int, _ item: Value) -> Bool {
+    if let i = intOf(item) {
+        if i < 0 || i > 255 {
+            it.throw("ValueError", "byte must be in range(0, 256)")
+            return false
+        }
+        return it.blobs[id].contains(i)
+    }
+    if let part = needBytes(it, item) {
+        return findBytes(it.blobs[id], part, 0, it.blobs[id].count, false) >= 0
+    }
+    false
+}
+
+fn repeatBytes(_ b: [Int], _ times: Int) -> [Int] {
+    var out: [Int] = []
+    if times <= 0 {
+        return out
+    }
+    for _ in 0..times {
+        out.appendAll(b)
+    }
+    out
+}
+
+// bytes + bytes and bytes * n. Nil if it's not for bytes to do.
+fn bytesOp(_ it: bind Interp, _ op: BinOp, _ id: Int, _ mutable: Bool, _ b: Value) -> Value? {
+    if op == .add {
+        match b {
+            .bytes(other, _) -> {
+                var out = it.blobs[id]
+                out.appendAll(it.blobs[other])
+                return it.newBytes(out, mutable)
+            }
+            .instance(_) -> { return nil }
+            _ -> { return it.throw("TypeError", "can't concat {typeName(it, b)} to {bytesTypeName(mutable)}") }
+        }
+    }
+    if op == .mul {
+        if let n = intOf(b) {
+            return it.newBytes(repeatBytes(it.blobs[id], n), mutable)
+        }
+        match b {
+            .instance(_) -> {}
+            _ -> { return it.throw("TypeError", "can't multiply sequence by non-int of type '{typeName(it, b)}'") }
+        }
+    }
+    nil
+}
+
+fn bytesItem(_ it: bind Interp, _ id: Int, _ mutable: Bool, _ index: Value) -> Value {
+    if let i = intOf(index) {
+        if let at = position(i, it.blobs[id].count) {
+            return .int(i: it.blobs[id][at])
+        }
+        return it.throw("IndexError", if mutable { "bytearray index out of range" } else { "index out of range" })
+    }
+    it.throw("TypeError", "{if mutable { "bytearray" } else { "byte" }} indices must be integers or slices, not {typeName(it, index)}")
+}
+
+// A value to put in a bytearray: a whole number from 0 to 255.
+fn byteValue(_ it: bind Interp, _ v: Value) -> Int? {
+    if let i = intOf(v) {
+        if i < 0 || i > 255 {
+            it.throw("ValueError", "byte must be in range(0, 256)")
+            return nil
+        }
+        return i
+    }
+    it.throw("TypeError", "'{typeName(it, v)}' object cannot be interpreted as an integer")
+    nil
+}
+
+fn bytesSetItem(_ it: bind Interp, _ id: Int, _ mutable: Bool, _ index: Value, _ v: Value) {
+    if !mutable {
+        it.throw("TypeError", "'bytes' object does not support item assignment")
+        return
+    }
+    if let i = intOf(index) {
+        if let at = position(i, it.blobs[id].count) {
+            if let b = byteValue(it, v) {
+                it.blobs[id][at] = b
+            }
+        } else {
+            it.throw("IndexError", "bytearray index out of range")
+        }
+    } else {
+        it.throw("TypeError", "bytearray indices must be integers or slices, not {typeName(it, index)}")
+    }
+}
+
+// bytearray[lower:upper:step] = v, and `del` of a slice (`deleting`).
+fn bytesSetSlice(_ it: bind Interp, _ id: Int, _ mutable: Bool, _ lower: Int?, _ upper: Int?, _ step: Int?, _ v: Value, _ deleting: Bool) {
+    if !mutable {
+        it.throw("TypeError", if deleting { "'bytes' object does not support item deletion" } else { "'bytes' object does not support item assignment" })
+        return
+    }
+    var replacement: [Int] = []
+    if !deleting {
+        if let b = bytesOf(it, v) {
+            replacement = b
+        } else {
+            match v {
+                .str(_) -> {
+                    it.throw("TypeError", "can assign only bytes, buffers, or iterables of ints in range(0, 256)")
+                    return
+                }
+                _ -> {}
+            }
+            if !isIterable(it, v) {
+                it.throw("TypeError", "can assign only bytes, buffers, or iterables of ints in range(0, 256)")
+                return
+            }
+            if let b = byteItems(it, v, "byte") {
+                replacement = b
+            } else {
+                return
+            }
+        }
+    }
+    let count = it.blobs[id].count
+    let at = sliceIndices(it, count, lower, upper, step)
+    if it.signal != .none {
+        return
+    }
+    if (step ?? 1) == 1 {
+        var from = lower ?? 0
+        if from < 0 {
+            from = if from + count < 0 { 0 } else { from + count }
+        }
+        if from > count {
+            from = count
+        }
+        let to = if at.isEmpty { from } else { at[at.count - 1] + 1 }
+        var out = it.blobs[id].slice(from: 0, to: from)
+        out.appendAll(replacement)
+        out.appendAll(it.blobs[id].slice(from: to, to: count))
+        it.blobs[id] = out
+        return
+    }
+    if deleting {
+        var out: [Int] = []
+        for i in 0..count {
+            if !at.contains(i) {
+                out.append(it.blobs[id][i])
+            }
+        }
+        it.blobs[id] = out
+        return
+    }
+    if replacement.count != at.count {
+        it.throw("ValueError", "attempt to assign bytes of size {replacement.count} to extended slice of size {at.count}")
+        return
+    }
+    for k in at.indices {
+        it.blobs[id][at[k]] = replacement[k]
+    }
+}
+
+fn bytesDeleteItem(_ it: bind Interp, _ id: Int, _ mutable: Bool, _ index: Value) {
+    if !mutable {
+        it.throw("TypeError", "'bytes' object doesn't support item deletion")
+        return
+    }
+    if let i = intOf(index) {
+        if let at = position(i, it.blobs[id].count) {
+            it.blobs[id].remove(at: at)
+        } else {
+            it.throw("IndexError", "bytearray index out of range")
+        }
+    } else {
+        it.throw("TypeError", "bytearray indices must be integers or slices, not {typeName(it, index)}")
+    }
+}
+
+// ---- methods ----
+
+fn isByteSpace(_ b: Int) -> Bool {
+    b == 32 || (b >= 9 && b <= 13)
+}
+
+fn isByteLetter(_ b: Int) -> Bool {
+    (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+}
+
+fn isByteDigit(_ b: Int) -> Bool {
+    b >= 48 && b <= 57
+}
+
+// The stretch `start:end` of `count` items, as [from, to].
+fn stretch(_ args: [Value], _ at: Int, _ count: Int) -> [Int] {
+    var from = 0
+    var to = count
+    if args.count > at {
+        if let i = intOf(args[at]) {
+            from = if i < 0 { (if i + count < 0 { 0 } else { i + count }) } else { i }
+        }
+    }
+    if args.count > at + 1 {
+        if let i = intOf(args[at + 1]) {
+            to = if i < 0 { (if i + count < 0 { 0 } else { i + count }) } else { i }
+        }
+    }
+    if to > count {
+        to = count
+    }
+    [from, to]
+}
+
+// What to look for: bytes, or one byte given as a number.
+fn bytesNeedle(_ it: bind Interp, _ v: Value) -> [Int]? {
+    if let i = intOf(v) {
+        if i < 0 || i > 255 {
+            it.throw("ValueError", "byte must be in range(0, 256)")
+            return nil
+        }
+        return [i]
+    }
+    if let b = bytesOf(it, v) {
+        return b
+    }
+    it.throw("TypeError", "argument should be integer or bytes-like object, not '{typeName(it, v)}'")
+    nil
+}
+
+// Whether `strip` takes a byte off: one of `chars`, or a space if there are none.
+fn stripsByte(_ chars: [Int]?, _ b: Int) -> Bool {
+    if let c = chars {
+        return c.contains(b)
+    }
+    isByteSpace(b)
+}
+
+fn stripBytes(_ b: [Int], _ chars: [Int]?, _ left: Bool, _ right: Bool) -> [Int] {
+    var from = 0
+    var to = b.count
+    if left {
+        while from < to && stripsByte(chars, b[from]) {
+            from += 1
+        }
+    }
+    if right {
+        while to > from && stripsByte(chars, b[to - 1]) {
+            to -= 1
+        }
+    }
+    b.slice(from: from, to: to)
+}
+
+// b.split(sep, maxsplit) and b.rsplit(…).
+fn splitBytes(_ it: bind Interp, _ b: [Int], _ args: [Value], _ kwNames: [String], _ kwValues: [Value], _ fromRight: Bool) -> [[Int]]? {
+    var separator = Value.none
+    var limit = -1
+    if !args.isEmpty {
+        separator = args[0]
+    }
+    if args.count > 1 {
+        limit = intOf(args[1]) ?? -1
+    }
+    let named = keyword(kwNames, kwValues, "sep")
+    if named != Value.absent {
+        separator = named
+    }
+    match keyword(kwNames, kwValues, "maxsplit") {
+        .int(i) -> { limit = i }
+        _ -> {}
+    }
+    var parts: [[Int]] = []
+    if separator == Value.none {
+        // The words between runs of spaces.
+        if fromRight && limit >= 0 {
+            var end = b.count
+            var done = 0
+            while true {
+                while end > 0 && isByteSpace(b[end - 1]) {
+                    end -= 1
+                }
+                if end == 0 {
+                    break
+                }
+                if done == limit {
+                    parts.append(b.slice(from: 0, to: end))
+                    break
+                }
+                var start = end
+                while start > 0 && !isByteSpace(b[start - 1]) {
+                    start -= 1
+                }
+                parts.append(b.slice(from: start, to: end))
+                end = start
+                done += 1
+            }
+            return parts.reversed()
+        }
+        var i = 0
+        var done = 0
+        while i < b.count {
+            while i < b.count && isByteSpace(b[i]) {
+                i += 1
+            }
+            if i >= b.count {
+                break
+            }
+            if limit >= 0 && done == limit {
+                parts.append(b.slice(from: i, to: b.count))
+                break
+            }
+            var end = i
+            while end < b.count && !isByteSpace(b[end]) {
+                end += 1
+            }
+            parts.append(b.slice(from: i, to: end))
+            i = end
+            done += 1
+        }
+        return parts
+    }
+    if let sep = needBytes(it, separator) {
+        if sep.isEmpty {
+            it.throw("ValueError", "empty separator")
+            return nil
+        }
+        if fromRight {
+            var end = b.count
+            var done = 0
+            while limit < 0 || done < limit {
+                let at = findBytes(b, sep, 0, end, true)
+                if at < 0 {
+                    break
+                }
+                parts.append(b.slice(from: at + sep.count, to: end))
+                end = at
+                done += 1
+            }
+            parts.append(b.slice(from: 0, to: end))
+            return parts.reversed()
+        }
+        var start = 0
+        var done = 0
+        while limit < 0 || done < limit {
+            let at = findBytes(b, sep, start, b.count, false)
+            if at < 0 {
+                break
+            }
+            parts.append(b.slice(from: start, to: at))
+            start = at + sep.count
+            done += 1
+        }
+        parts.append(b.slice(from: start, to: b.count))
+        return parts
+    }
+    nil
+}
+
+fn bytesMethod(_ it: bind Interp, _ id: Int, _ mutable: Bool, _ name: String, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
+    let b = it.blobs[id]
+    let type = bytesTypeName(mutable)
+    match name {
+        "decode" -> {
+            if let codec = codecArgs(it, name, args, 0, kwNames, kwValues) {
+                return decodeBytes(it, b, codec[0], codec[1])
+            }
+            Value.none
+        }
+        "hex" -> {
+            if args.isEmpty {
+                return .str(s: Data(bytes: b).hex)
+            }
+            // b.hex(":"): a separator between the bytes.
+            var separator = ""
+            match args[0] {
+                .str(s) -> { separator = s }
+                .bytes(other, _) -> { separator = Data(bytes: it.blobs[other]).text ?? "" }
+                _ -> { return it.throw("TypeError", "sep must be str or bytes.") }
+            }
+            if separator.count != 1 {
+                return it.throw("ValueError", "sep must be length 1.")
+            }
+            var parts: [String] = []
+            for x in b {
+                parts.append(hexByte(x))
+            }
+            Value.str(s: parts.joined(separator: separator))
+        }
+        "find", "rfind", "index", "rindex" -> {
+            if !arity(it, name, args, 1, 3) {
+                return Value.none
+            }
+            if let needle = bytesNeedle(it, args[0]) {
+                let range = stretch(args, 1, b.count)
+                var at = -1
+                if range[0] <= range[1] {
+                    at = findBytes(b, needle, range[0], range[1], name.hasPrefix("r"))
+                }
+                if at < 0 && name.hasSuffix("index") {
+                    return it.throw("ValueError", "subsection not found")
+                }
+                return .int(i: at)
+            }
+            Value.none
+        }
+        "count" -> {
+            if !arity(it, name, args, 1, 3) {
+                return Value.none
+            }
+            if let needle = bytesNeedle(it, args[0]) {
+                let range = stretch(args, 1, b.count)
+                if needle.isEmpty {
+                    return .int(i: if range[1] >= range[0] { range[1] - range[0] + 1 } else { 0 })
+                }
+                var n = 0
+                var from = range[0]
+                while true {
+                    let at = findBytes(b, needle, from, range[1], false)
+                    if at < 0 {
+                        break
+                    }
+                    n += 1
+                    from = at + needle.count
+                }
+                return .int(i: n)
+            }
+            Value.none
+        }
+        "startswith", "endswith" -> {
+            if !arity(it, name, args, 1, 3) {
+                return Value.none
+            }
+            var options: [Value] = [args[0]]
+            match args[0] {
+                .tuple(t) -> { options = it.lists[t] }
+                _ -> {}
+            }
+            let range = stretch(args, 1, b.count)
+            for option in options {
+                if let part = bytesOf(it, option) {
+                    if range[1] - range[0] >= part.count {
+                        let at = if name == "startswith" { range[0] } else { range[1] - part.count }
+                        if findBytes(b, part, at, at + part.count, false) == at {
+                            return .bool(b: true)
+                        }
+                    }
+                } else {
+                    return it.throw("TypeError", "{name} first arg must be bytes or a tuple of bytes, not {typeName(it, option)}")
+                }
+            }
+            Value.bool(b: false)
+        }
+        "split", "rsplit" -> {
+            if let parts = splitBytes(it, b, args, kwNames, kwValues, name == "rsplit") {
+                var out: [Value] = []
+                for p in parts {
+                    out.append(it.newBytes(p, mutable))
+                }
+                return it.newList(out)
+            }
+            Value.none
+        }
+        "splitlines" -> {
+            var out: [Value] = []
+            var start = 0
+            var i = 0
+            while i < b.count {
+                if b[i] == 10 || b[i] == 13 {
+                    out.append(it.newBytes(b.slice(from: start, to: i), mutable))
+                    if b[i] == 13 && i + 1 < b.count && b[i + 1] == 10 {
+                        i += 1
+                    }
+                    start = i + 1
+                }
+                i += 1
+            }
+            if start < b.count {
+                out.append(it.newBytes(b.slice(from: start, to: b.count), mutable))
+            }
+            it.newList(out)
+        }
+        "partition", "rpartition" -> {
+            if !arity(it, name, args, 1, 1) {
+                return Value.none
+            }
+            if let sep = needBytes(it, args[0]) {
+                if sep.isEmpty {
+                    return it.throw("ValueError", "empty separator")
+                }
+                let at = findBytes(b, sep, 0, b.count, name == "rpartition")
+                if at < 0 {
+                    if name == "partition" {
+                        return it.newTuple([it.newBytes(b, mutable), it.newBytes([], mutable), it.newBytes([], mutable)])
+                    }
+                    return it.newTuple([it.newBytes([], mutable), it.newBytes([], mutable), it.newBytes(b, mutable)])
+                }
+                return it.newTuple([it.newBytes(b.slice(from: 0, to: at), mutable), it.newBytes(sep, mutable),
+                                    it.newBytes(b.slice(from: at + sep.count, to: b.count), mutable)])
+            }
+            Value.none
+        }
+        "join" -> {
+            if !arity(it, name, args, 1, 1) {
+                return Value.none
+            }
+            let items = iterate(it, args[0])
+            if it.signal != .none {
+                return Value.none
+            }
+            var out: [Int] = []
+            for i in items.indices {
+                if let part = bytesOf(it, items[i]) {
+                    if i > 0 {
+                        out.appendAll(b)
+                    }
+                    out.appendAll(part)
+                } else {
+                    return it.throw("TypeError", "sequence item {i}: expected a bytes-like object, {typeName(it, items[i])} found")
+                }
+            }
+            it.newBytes(out, mutable)
+        }
+        "replace" -> {
+            if !arity(it, name, args, 2, 3) {
+                return Value.none
+            }
+            if let old = needBytes(it, args[0]) {
+                if let new = needBytes(it, args[1]) {
+                    var left = -1
+                    if args.count > 2 {
+                        left = intOf(args[2]) ?? -1
+                    }
+                    var out: [Int] = []
+                    var i = 0
+                    if old.isEmpty {
+                        // (Between every byte, as with text.)
+                        while i <= b.count {
+                            if left != 0 {
+                                out.appendAll(new)
+                                left -= 1
+                            }
+                            if i < b.count {
+                                out.append(b[i])
+                            }
+                            i += 1
+                        }
+                        return it.newBytes(out, mutable)
+                    }
+                    while left != 0 {
+                        let at = findBytes(b, old, i, b.count, false)
+                        if at < 0 {
+                            break
+                        }
+                        out.appendAll(b.slice(from: i, to: at))
+                        out.appendAll(new)
+                        i = at + old.count
+                        left -= 1
+                    }
+                    out.appendAll(b.slice(from: i, to: b.count))
+                    return it.newBytes(out, mutable)
+                }
+            }
+            Value.none
+        }
+        "strip", "lstrip", "rstrip" -> {
+            var chars: [Int]? = nil
+            if !args.isEmpty && args[0] != Value.none {
+                if let c = needBytes(it, args[0]) {
+                    chars = c
+                } else {
+                    return Value.none
+                }
+            }
+            it.newBytes(stripBytes(b, chars, name != "rstrip", name != "lstrip"), mutable)
+        }
+        "removeprefix", "removesuffix" -> {
+            if !arity(it, name, args, 1, 1) {
+                return Value.none
+            }
+            if let part = needBytes(it, args[0]) {
+                if part.count <= b.count {
+                    if name == "removeprefix" && findBytes(b, part, 0, part.count, false) == 0 {
+                        return it.newBytes(b.slice(from: part.count, to: b.count), mutable)
+                    }
+                    if name == "removesuffix" && findBytes(b, part, b.count - part.count, b.count, false) >= 0 {
+                        return it.newBytes(b.slice(from: 0, to: b.count - part.count), mutable)
+                    }
+                }
+                return it.newBytes(b, mutable)
+            }
+            Value.none
+        }
+        "upper", "lower", "swapcase", "capitalize" -> {
+            var out: [Int] = []
+            for i in b.indices {
+                let x = b[i]
+                var up = name == "upper"
+                if name == "swapcase" {
+                    up = x >= 97
+                } else if name == "capitalize" {
+                    up = i == 0
+                }
+                if up && x >= 97 && x <= 122 {
+                    out.append(x - 32)
+                } else if !up && x >= 65 && x <= 90 {
+                    out.append(x + 32)
+                } else {
+                    out.append(x)
+                }
+            }
+            it.newBytes(out, mutable)
+        }
+        "isdigit", "isalpha", "isalnum", "isspace", "isupper", "islower", "isascii" -> {
+            if name == "isascii" {
+                for x in b {
+                    if x > 127 {
+                        return .bool(b: false)
+                    }
+                }
+                return .bool(b: true)
+            }
+            var cased = false
+            for x in b {
+                var fine = true
+                match name {
+                    "isdigit" -> { fine = isByteDigit(x) }
+                    "isalpha" -> { fine = isByteLetter(x) }
+                    "isalnum" -> { fine = isByteLetter(x) || isByteDigit(x) }
+                    "isspace" -> { fine = isByteSpace(x) }
+                    "isupper" -> {
+                        fine = !(x >= 97 && x <= 122)
+                        cased = cased || (x >= 65 && x <= 90)
+                    }
+                    _ -> {
+                        fine = !(x >= 65 && x <= 90)
+                        cased = cased || (x >= 97 && x <= 122)
+                    }
+                }
+                if !fine {
+                    return .bool(b: false)
+                }
+            }
+            if name == "isupper" || name == "islower" {
+                return .bool(b: cased)
+            }
+            Value.bool(b: !b.isEmpty)
+        }
+        "zfill", "ljust", "rjust", "center" -> {
+            if !arity(it, name, args, 1, 2) {
+                return Value.none
+            }
+            let width = intOf(args[0]) ?? 0
+            var fill = if name == "zfill" { 48 } else { 32 }
+            if args.count > 1 {
+                if let f = bytesOf(it, args[1]) {
+                    if f.count != 1 {
+                        return it.throw("TypeError", "{name}() argument 2 must be a byte string of length 1, not {type} object of length {f.count}")
+                    }
+                    fill = f[0]
+                } else {
+                    return it.throw("TypeError", "{name}() argument 2 must be a byte string of length 1, not {typeName(it, args[1])}")
+                }
+            }
+            if width <= b.count {
+                return it.newBytes(b, mutable)
+            }
+            let total = width - b.count
+            var left = 0
+            if name == "rjust" {
+                left = total
+            } else if name == "center" {
+                left = total / 2 + (total & width & 1)
+            } else if name == "zfill" {
+                left = total
+            }
+            var out: [Int] = []
+            var body = b
+            if name == "zfill" && !b.isEmpty && (b[0] == 43 || b[0] == 45) {
+                // (The sign stays in front of the zeros.)
+                out.append(b[0])
+                body = b.slice(from: 1, to: b.count)
+            }
+            for _ in 0..left {
+                out.append(fill)
+            }
+            out.appendAll(body)
+            for _ in 0..(total - left) {
+                out.append(fill)
+            }
+            it.newBytes(out, mutable)
+        }
+        "fromhex" -> bytesFromHex(it, args, mutable)
+        "copy" -> {
+            if mutable {
+                return it.newBytes(b, true)
+            }
+            it.throw("AttributeError", "'bytes' object has no attribute 'copy'")
+        }
+        "__len__" -> .int(i: b.count)
+        _ -> {
+            if mutable {
+                return bytearrayMethod(it, id, name, args)
+            }
+            it.throw("AttributeError", "'{type}' object has no attribute '{name}'")
+        }
+    }
+}
+
+// The methods that change a bytearray.
+fn bytearrayMethod(_ it: bind Interp, _ id: Int, _ name: String, _ args: [Value]) -> Value {
+    match name {
+        "append" -> {
+            if !arity(it, name, args, 1, 1) {
+                return Value.none
+            }
+            if let b = byteValue(it, args[0]) {
+                it.blobs[id].append(b)
+            }
+            Value.none
+        }
+        "extend" -> {
+            if !arity(it, name, args, 1, 1) {
+                return Value.none
+            }
+            if let more = bytesOf(it, args[0]) {
+                it.blobs[id].appendAll(more)
+                return Value.none
+            }
+            if !isIterable(it, args[0]) {
+                return it.throw("TypeError", "can't extend bytearray with {typeName(it, args[0])}")
+            }
+            if let more = byteItems(it, args[0], "byte") {
+                it.blobs[id].appendAll(more)
+            }
+            Value.none
+        }
+        "pop" -> {
+            if !arity(it, name, args, 0, 1) {
+                return Value.none
+            }
+            let count = it.blobs[id].count
+            if count == 0 {
+                return it.throw("IndexError", "pop from empty bytearray")
+            }
+            var index = -1
+            if !args.isEmpty {
+                index = intOf(args[0]) ?? -1
+            }
+            if let at = position(index, count) {
+                let b = it.blobs[id][at]
+                it.blobs[id].remove(at: at)
+                return .int(i: b)
+            }
+            it.throw("IndexError", "pop index out of range")
+        }
+        "clear" -> {
+            it.blobs[id] = []
+            Value.none
+        }
+        "insert" -> {
+            if !arity(it, name, args, 2, 2) {
+                return Value.none
+            }
+            if let b = byteValue(it, args[1]) {
+                let count = it.blobs[id].count
+                var at = intOf(args[0]) ?? 0
+                if at < 0 {
+                    at = if at + count < 0 { 0 } else { at + count }
+                }
+                if at > count {
+                    at = count
+                }
+                it.blobs[id].insert(b, at: at)
+            }
+            Value.none
+        }
+        "remove" -> {
+            if !arity(it, name, args, 1, 1) {
+                return Value.none
+            }
+            if let b = byteValue(it, args[0]) {
+                if let at = it.blobs[id].index(of: b) {
+                    it.blobs[id].remove(at: at)
+                } else {
+                    return it.throw("ValueError", "value not found in bytearray")
+                }
+            }
+            Value.none
+        }
+        "reverse" -> {
+            it.blobs[id] = it.blobs[id].reversed()
+            Value.none
+        }
+        _ -> it.throw("AttributeError", "'bytearray' object has no attribute '{name}'")
+    }
+}
+
+// ---- int.to_bytes and int.from_bytes ----
+
+// The byte order a call names: true for "little". Nil (raised) if it's wrong.
+fn littleEndian(_ it: bind Interp, _ order: Value) -> Bool? {
+    match order {
+        .absent -> { return false }
+        .str(s) -> {
+            if s == "little" {
+                return true
+            }
+            if s == "big" {
+                return false
+            }
+            it.throw("ValueError", "byteorder must be either 'little' or 'big'")
+            return nil
+        }
+        _ -> {
+            it.throw("TypeError", "to_bytes() argument 'byteorder' must be str, not {typeName(it, order)}")
+            return nil
+        }
+    }
+}
+
+// n.to_bytes(length, byteorder, signed=False).
+fn intToBytes(_ it: bind Interp, _ n: Int, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
+    var length = 1
+    let lengthValue = if args.count > 0 { args[0] } else { keyword(kwNames, kwValues, "length") }
+    if lengthValue != Value.absent {
+        if let l = intOf(lengthValue) {
+            length = l
+        } else {
+            return it.throw("TypeError", "'{typeName(it, lengthValue)}' object cannot be interpreted as an integer")
+        }
+    }
+    if length < 0 {
+        return it.throw("ValueError", "length argument must be non-negative")
+    }
+    let order = if args.count > 1 { args[1] } else { keyword(kwNames, kwValues, "byteorder") }
+    let signedValue = keyword(kwNames, kwValues, "signed")
+    let signed = signedValue != Value.absent && truthy(it, signedValue)
+    if n < 0 && !signed {
+        return it.throw("OverflowError", "can't convert negative int to unsigned")
+    }
+    if let little = littleEndian(it, order) {
+        // From the lowest byte up; past the 64 bits there's only the sign.
+        var out: [Int] = []
+        var rest = n
+        for _ in 0..length {
+            out.append(rest & 255)
+            rest = rest >> 8
+        }
+        var fits = rest == 0 || rest == -1
+        if fits && signed && length > 0 {
+            // (The top bit says the sign.)
+            fits = (out[length - 1] >= 128) == (n < 0)
+        }
+        if fits && length == 0 {
+            fits = n == 0
+        }
+        if !fits || (rest == -1 && !signed) {
+            return it.throw("OverflowError", "int too big to convert")
+        }
+        return it.newBytes(if little { out } else { out.reversed() }, false)
+    }
+    Value.none
+}
+
+// int.from_bytes(bytes, byteorder, signed=False).
+fn intFromBytes(_ it: bind Interp, _ args: [Value], _ kwNames: [String], _ kwValues: [Value]) -> Value {
+    let source = if args.count > 0 { args[0] } else { keyword(kwNames, kwValues, "bytes") }
+    if source == Value.absent {
+        return it.throw("TypeError", "from_bytes() missing required argument 'bytes' (pos 1)")
+    }
+    var bytes: [Int] = []
+    if let b = bytesOf(it, source) {
+        bytes = b
+    } else if isIterable(it, source) && typeName(it, source) != "str" {
+        if let b = byteItems(it, source, "bytes") {
+            bytes = b
+        } else {
+            return Value.none
+        }
+    } else {
+        return it.throw("TypeError", "cannot convert '{typeName(it, source)}' object to bytes")
+    }
+    let order = if args.count > 1 { args[1] } else { keyword(kwNames, kwValues, "byteorder") }
+    let signedValue = keyword(kwNames, kwValues, "signed")
+    let signed = signedValue != Value.absent && truthy(it, signedValue)
+    if let little = littleEndian(it, order) {
+        // The highest byte first.
+        let high = if little { bytes.reversed() } else { bytes }
+        let negative = signed && !high.isEmpty && high[0] >= 128
+        var n = if negative { -1 } else { 0 }
+        for i in high.indices {
+            // (More than 64 bits only if the ones in front are all sign.)
+            let top = n >> 55
+            if top != 0 && top != -1 {
+                return tooLarge(it)
+            }
+            if i >= 8 && !signed && n < 0 {
+                return tooLarge(it)
+            }
+            n = (n << 8) | high[i]
+        }
+        if !signed && n < 0 {
+            return tooLarge(it)
+        }
+        return .int(i: n)
+    }
+    Value.none
+}
+
+// ---- files of bytes ----
+
+// The next line of a file of bytes (`.absent` at its end).
+fn binaryLine(_ it: bind Interp, _ id: Int) -> Value {
+    let from = it.files[id].pos
+    let count = it.files[id].data.count
+    if from >= count {
+        it.stopValue = .none
+        return Value.absent
+    }
+    var to = from
+    while to < count && it.files[id].data[to] != 10 {
+        to += 1
+    }
+    if to < count {
+        to += 1
+    }
+    it.files[id].pos = to
+    it.newBytes(it.files[id].data.slice(from: from, to: to), false)
+}
+
+// What a file of bytes does its own way: read, readline, readlines, write.
+// Nil for the rest (close, flush, …), which are as a text file's.
+fn binaryFileMethod(_ it: bind Interp, _ id: Int, _ name: String, _ args: [Value]) -> Value? {
+    let reading = it.files[id].mode.contains("r")
+    match name {
+        "read" -> {
+            if !reading {
+                return it.throw("UnsupportedOperation", "read")
+            }
+            let from = it.files[id].pos
+            var to = it.files[id].data.count
+            if !args.isEmpty {
+                if let n = intOf(args[0]) {
+                    if n >= 0 && from + n < to {
+                        to = from + n
+                    }
+                }
+            }
+            it.files[id].pos = to
+            return it.newBytes(it.files[id].data.slice(from: from, to: to), false)
+        }
+        "readline" -> {
+            if !reading {
+                return it.throw("UnsupportedOperation", "read")
+            }
+            let line = binaryLine(it, id)
+            if isAbsent(line) {
+                return it.newBytes([], false)
+            }
+            return line
+        }
+        "readlines" -> {
+            var out: [Value] = []
+            while true {
+                let line = binaryLine(it, id)
+                if isAbsent(line) {
+                    break
+                }
+                out.append(line)
+            }
+            return it.newList(out)
+        }
+        "write" -> {
+            if reading && !it.files[id].mode.contains("+") {
+                return it.throw("UnsupportedOperation", "write")
+            }
+            if args.count != 1 {
+                return it.throw("TypeError", "write() takes exactly one argument ({args.count} given)")
+            }
+            if let b = needBytes(it, args[0]) {
+                it.files[id].data.appendAll(b)
+                return .int(i: b.count)
+            }
+            return Value.none
+        }
+        "writelines" -> {
+            if args.count != 1 {
+                return it.throw("TypeError", "writelines() takes exactly one argument ({args.count} given)")
+            }
+            let items = iterate(it, args[0])
+            if it.signal != .none {
+                return Value.none
+            }
+            for item in items {
+                if let b = needBytes(it, item) {
+                    it.files[id].data.appendAll(b)
+                } else {
+                    return Value.none
+                }
+            }
+            return Value.none
+        }
+        _ -> { return nil }
+    }
+}

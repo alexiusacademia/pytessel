@@ -2,7 +2,7 @@
 // indentation, so the lexer also says where a block starts (`indent`) and
 // ends (`dedent`), and where a statement's line ends (`newline`).
 
-enum TokKind { name, keyword, int, float, str, fstr, op, newline, indent, dedent, eof }
+enum TokKind { name, keyword, int, float, str, fstr, bytes, op, newline, indent, dedent, eof }
 
 struct Token {
     kind: TokKind
@@ -93,6 +93,11 @@ fn hexValue(_ text: String) -> Int {
 
 // A string literal's text with its escapes (`\n`, `\x41`, …) carried out.
 fn unescape(_ raw: String) -> String {
+    unescapeText(raw, false)
+}
+
+// (In a bytes literal, `\u…` isn't an escape.)
+fn unescapeText(_ raw: String, _ forBytes: Bool) -> String {
     if !raw.contains("\\") {
         return raw
     }
@@ -114,7 +119,17 @@ fn unescape(_ raw: String) -> String {
             "\\" -> { out += "\\" }
             "'" -> { out += "'" }
             "\"" -> { out += "\"" }
-            "0" -> { out += chrOf(0) }
+            "0", "1", "2", "3", "4", "5", "6", "7" -> {
+                // Up to three octal digits: \0, \101.
+                var code = "01234567".find(e) ?? 0
+                var digits = 1
+                while digits < 3 && i < c.count && c[i] >= "0" && c[i] <= "7" && c[i].count == 1 {
+                    code = code * 8 + ("01234567".find(c[i]) ?? 0)
+                    i += 1
+                    digits += 1
+                }
+                out += chrOf(code)
+            }
             "a" -> { out += chrOf(7) }
             "b" -> { out += chrOf(8) }
             "f" -> { out += chrOf(12) }
@@ -127,7 +142,9 @@ fn unescape(_ raw: String) -> String {
                     hex += c[i]
                     i += 1
                 }
-                if hex.count == want {
+                if forBytes && e != "x" {
+                    out += "\\" + e
+                } else if hex.count == want {
                     out += chrOf(hexValue(hex))
                 } else {
                     out += "\\" + e + hex
@@ -353,7 +370,16 @@ struct Lexer {
         }
         let at = line
         line = startLine
-        if formatted {
+        if prefix.contains("b") {
+            // (Each character is a byte; the parser makes them numbers.)
+            for ch in text.characters {
+                if ordOf(ch) > 127 {
+                    fail("bytes can only contain ASCII literal characters")
+                    break
+                }
+            }
+            push(.bytes, if raw { text } else { unescapeText(text, true) })
+        } else if formatted {
             // (Its parts are taken apart by the parser, which knows expressions.)
             push(.fstr, if raw { "r" + text } else { "n" + text })
         } else {

@@ -28,6 +28,8 @@ enum Value {
     // What `iter`, `map`, `zip`, `enumerate`, … and generators give.
     iterator(id: Int)
     file(id: Int)
+    // bytes, or a bytearray (`mutable`): `Interp.blobs[id]`.
+    bytes(id: Int, mutable: Bool)
     // staticmethod (0), classmethod (1) and property (2) around `cells[id]`.
     wrapper(kind: Int, id: Int)
     // super(): the object (`cells[cell]`) seen as the classes after `cls`.
@@ -274,6 +276,10 @@ struct PyFile {
     // For writing: what was written and not saved yet.
     pending: String = ""
     closed: Bool = false
+    // Opened with "b": what it has is bytes. For reading: all of them
+    // (`pos` is how far it's read); for writing: the ones not saved yet.
+    binary: Bool = false
+    data: [Int] = []
 }
 
 // The variables of a module, a function call or a class body.
