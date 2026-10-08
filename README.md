@@ -26,14 +26,24 @@ PyTessel follows Python 3. The programs in `tests/` print exactly what CPython
 prints for them, error messages included.
 
 - **Values:** `int`, `float`, `bool`, `str`, `None`, `list`, `tuple`, `dict`,
-  `set`, `range`, with their operators, slices, and methods (`str.split`,
-  `list.sort`, `dict.setdefault`, `set.union`, …).
+  `set`, `range`, `bytes`, `bytearray`, `slice`, `Ellipsis`,
+  `NotImplemented`, with their operators, slices, and methods (`str.split`,
+  `list.sort`, `dict.setdefault`, `set.union`, `bytes.hex`, …).
+- **Bytes:** `b"…"` and `rb"…"` literals, `str.encode` and `bytes.decode`
+  (utf-8, ascii, latin-1; `errors=` strict, ignore, replace),
+  `int.to_bytes` and `int.from_bytes`, files opened with `"rb"`, `"wb"`,
+  `"ab"`.
 - **Statements:** `if`/`elif`/`else`, `while` and `for` (with `else`,
   `break`, `continue`), assignment with unpacking (`a, *rest = xs`),
   augmented assignment, `del`, `assert`, `pass`, `global`, `nonlocal`,
-  `with`, `try`/`except`/`else`/`finally`, `raise`.
-- **Functions:** defaults, `*args`, `**kwargs`, keyword arguments, closures,
-  `lambda`, decorators, recursion.
+  `with`, `try`/`except`/`else`/`finally`, `raise`, and `match` with every
+  kind of pattern (`match` and `case` stay ordinary names elsewhere).
+- **Functions:** defaults, `*args`, `**kwargs`, keyword arguments,
+  keyword-only parameters, closures, `lambda`, decorators, recursion.
+- **Names** live where Python says: a name a function assigns anywhere is
+  its own everywhere in it (reading it too early is an `UnboundLocalError`),
+  comprehensions have their own variables, `except … as e` forgets `e`
+  after its block.
 - **Generators:** a function with `yield` runs up to its next `yield` each
   time it's asked for a value, so one that never ends (`while True: yield
   …`) is fine; `send`, `throw`, `close`, `yield from` and generator
@@ -41,10 +51,19 @@ prints for them, error messages included.
   a value at a time too, and so do your own classes with `__iter__` and
   `__next__`.
 - **Classes:** inheritance (several bases too), `super()`, properties with
-  setters, `staticmethod`, `classmethod`, and the special methods: `__init__`,
-  `__repr__`, `__str__`, `__eq__`, `__lt__`, `__add__` and the other
-  operators, `__len__`, `__getitem__`, `__contains__`, `__iter__`,
-  `__next__`, `__call__`, `__bool__`, `__hash__`, `__enter__`, `__exit__`.
+  setters and deleters, `staticmethod`, `classmethod`, and the special
+  methods: `__init__`, `__new__`, `__repr__`, `__str__`, `__eq__`, `__lt__`,
+  `__add__` and the other operators (with `NotImplemented` and the
+  reflected ones, `__radd__`, …), `__len__`, `__getitem__` (given a real
+  `slice` for `x[1:2]`), `__contains__`, `__iter__`, `__next__`, `__call__`,
+  `__bool__`, `__hash__`, `__enter__`, `__exit__`, `__getattr__`,
+  `__getattribute__`, `__setattr__`, `__delattr__`, `__dir__`,
+  `__init_subclass__`, `__class_getitem__`, `__index__`.
+- **Descriptors, `__slots__`, metaclasses:** your own classes with
+  `__get__`, `__set__`, `__delete__`, `__set_name__`; `__slots__`;
+  `class C(metaclass=M)` with `__new__`, `__init__`, `__call__` and the
+  metaclass's methods on the class; `type(name, bases, namespace)`; `abc`
+  (`ABC`, `ABCMeta`, `abstractmethod`).
 - **Expressions:** comprehensions (list, dict, set, generator), f-strings
   with format specs (`f"{price:>10,.2f}"`, `f"{x=}"`), `%` formatting,
   `str.format`, chained comparisons, `x if c else y`, `:=`.
@@ -56,8 +75,8 @@ prints for them, error messages included.
 - **Modules:** `math`, `random`, `time`, `json`, `sys`, `os`, `os.path`,
   `string`, and the ones under [The standard library](#the-standard-library):
   `datetime`, `re`, `collections`, `itertools`, `functools`, `statistics`,
-  `operator`, `copy`, `textwrap`, `bisect`, `heapq`; and `import` of other
-  `.py` files next to the program.
+  `operator`, `copy`, `textwrap`, `bisect`, `heapq`, `enum`, `abc`; and
+  `import` of other `.py` files next to the program.
 
 ## What it doesn't
 
@@ -75,13 +94,29 @@ prints for them, error messages included.
   Python does when it frees one: only `close()` does, or leaving (`break`,
   `return`) a `for` loop that called the generator function itself
   (`for x in lines(): … break`).
-- **Not there:** `async`, `match`, `bytes`, complex numbers, `slice`
-  objects, metaclasses, `__slots__`, descriptors of your own, classes that
-  inherit from `dict`, `list` or `tuple`, and the rest of the standard
-  library (`enum`, `decimal`, `fractions`, `pathlib`, `csv`, …).
-- A name is looked up where it's used, so reading a variable before the
-  function assigns it finds the outer one, where Python raises
-  `UnboundLocalError`.
+- **Not there:** `async`, complex numbers, classes that inherit from a
+  built-in type (`class D(dict)`, `list`, `tuple`, `str`, `int`: a
+  `TypeError` says so), and the rest of the standard library (`decimal`,
+  `fractions`, `pathlib`, `csv`, …).
+- **Smaller things that differ:**
+  - A comparison gives `True` or `False` even when `__eq__` or `__lt__`
+    gives something else back.
+  - Error messages name a method plainly (`__init__() missing …`), where
+    Python 3.10 and later say `Widget.__init__()`.
+  - A class body's names are looked for as it runs, in the class, then
+    outwards: Python skips the functions around a class for a name the
+    class itself assigns.
+  - A metaclass has no `__prepare__`; a class with `__slots__` has no
+    slot objects of its own (`P.x` is an `AttributeError`).
+  - Dictionary keys: an object whose `__hash__` is that of a tuple (or,
+    with `__index__`, of a whole number) is the same key as that value;
+    two objects with the same `__hash__` are one key even if their
+    `__eq__` says they differ.
+  - `exec(source, namespace)` copies the dictionary's entries in and what
+    the code sets back out: a function made there doesn't see what's put
+    in the dictionary afterwards.
+  - `bytes` have no `%` formatting, `translate` or `maketrans`; the codecs
+    are utf-8, ascii and latin-1; `memoryview` isn't there.
 - **Speed:** about a fifth of CPython's on loops and calls.
 
 ## The standard library
@@ -95,7 +130,7 @@ included. (They show themselves as Python 3.9 does where versions differ:
 |---|---|---|
 | `datetime` | `date`, `time`, `datetime`, `timedelta`, `timezone` and `tzinfo`: making them (with the checks), `today`, `now`, `fromisoformat`, `fromordinal`, `fromtimestamp`, `fromisocalendar`, `combine`, `replace`, `weekday`, `isocalendar`, `timestamp`, `astimezone`, arithmetic and comparison, `isoformat`, `strftime`, `strptime`, hashing, `min`/`max`/`resolution` | Named time zones (`zoneinfo`): the computer's own zone and fixed distances from UTC are all there is. `timetuple()` gives a plain tuple. `strptime` has no `%U %W %G %V`. A timedelta of more than about 290,000 years can't be divided or multiplied by a float. `fromisoformat` reads what `isoformat` writes, as Python 3.9's does. |
 | `re` | `compile`, `match`, `search`, `fullmatch`, `findall`, `finditer`, `sub`, `subn`, `split`, `escape`, `purge`, `error`; Pattern and Match objects; sets, groups (named too), back references, greedy and lazy quantifiers, lookahead, lookbehind of a fixed width, `^ $ \A \Z \b \B`, the flags `I M S X A` and `(?i)`, `(?i:…)` | Conditional groups `(?(1)…)`, `\N{name}`, `re.LOCALE`, `re.DEBUG`, patterns of `bytes`. `\d` is ASCII's digits; which characters are letters, outside ASCII, is known roughly. A group inside `(?!…)` is never set. A repeat is written out as many times as it says, so `a{100000}` (and any pattern that comes to more than 200,000 steps) is refused. |
-| `collections` | `Counter`, `defaultdict`, `OrderedDict`, `deque`, `namedtuple`, `ChainMap` | They aren't `dict`s or `tuple`s to `isinstance`, to `json.dumps` or to `**` (`dict(counter)` makes one). A named tuple has no slices (`p[0:2]`), and as a dictionary key it isn't the same key as the plain tuple. `UserDict`, `UserList`, `UserString`, `collections.abc`. |
+| `collections` | `Counter`, `defaultdict`, `OrderedDict`, `deque`, `namedtuple`, `ChainMap` | They aren't `dict`s or `tuple`s to `isinstance`, to `json.dumps` or to `**` (`dict(counter)` makes one). `UserDict`, `UserList`, `UserString`, `collections.abc`. |
 | `itertools` | `count`, `cycle`, `repeat`, `accumulate`, `chain`, `chain.from_iterable`, `compress`, `dropwhile`, `takewhile`, `filterfalse`, `groupby`, `islice`, `pairwise`, `starmap`, `zip_longest`, `product`, `permutations`, `combinations`, `combinations_with_replacement`, `batched`, `tee` | The ones that never end, until generators run a step at a time (see above). `product` works its whole result out first. |
 | `functools` | `reduce`, `partial`, `lru_cache`, `cache`, `wraps`, `update_wrapper`, `cmp_to_key`, `total_ordering` | `singledispatch`, `cached_property`, `partialmethod`. |
 | `statistics` | `mean`, `fmean`, `geometric_mean`, `median`, `median_low`, `median_high`, `mode`, `multimode`, `variance`, `pvariance`, `stdev`, `pstdev`, `StatisticsError` | `Fraction` and `Decimal` data, `harmonic_mean`, `quantiles`, `median_grouped`, `NormalDist`. Python adds with exact fractions; PyTessel adds without loss and corrects its divisions, which gives the same floats but, rarely, for the last digit. |
@@ -105,9 +140,8 @@ included. (They show themselves as Python 3.9 does where versions differ:
 | `bisect`, `heapq` | All of both | `heapq.merge` sorts everything at once. |
 | `time` | `time`, `sleep`, `perf_counter`, `monotonic`, `process_time`, `time_ns`, `localtime`, `gmtime`, `mktime` | `strftime`, `strptime`; `localtime` and `gmtime` give plain tuples. |
 
-`enum` isn't there: `Color.RED`, `Color(1)`, `Color["RED"]` and `for c in
-Color` all need a class to say what calling, indexing and looping over
-*the class itself* do, which takes a metaclass.
+| `enum` | `Enum`, `IntEnum`, `Flag` (`IntFlag` is the same), `auto`, `unique`, `EnumType`; `Color.RED`, `Color(1)`, `Color["RED"]`, `for c in Color`, `__members__`, aliases, methods and properties on members | An `IntEnum`'s members aren't `int`s to `isinstance` (they compare, hash and do arithmetic as their values). `StrEnum`, `_ignore_`, the functional way (`Enum("Color", "RED GREEN")`), `__new__` on members. |
+| `abc` | `ABC`, `ABCMeta`, `abstractmethod` (alone and under `property`, `classmethod`, `staticmethod`) | `register`, `abstractproperty`. Any class with an abstract method left can't be instantiated, whatever its metaclass. |
 
 Most of them are written in Python, in `lib/`: PyTessel carries their text
 inside itself (`stdlib.tsl`) and runs it the first time a module is
@@ -162,11 +196,15 @@ let c = python.callFunction(py, "double", [.int(i: 21)])   // c.value is .int(i:
 |---|---|
 | `lexer.tsl` | Source text to tokens, with `indent` and `dedent` tokens for Python's blocks. |
 | `ast.tsl` | The syntax tree: an enum of nodes kept in one list, which name each other by index. |
-| `parser.tsl` | A recursive descent parser: a method for each level of Python's grammar. |
+| `parser.tsl` | A recursive descent parser: a method for each level of Python's grammar. It also settles where each name lives (a function's own, one of a function around it, or the module's), so that running the program needn't. |
 | `values.tsl` | Python's values. Lists, dictionaries and objects are shared, not copied, so they live in lists of the interpreter and a value says which one it is. |
 | `interp.tsl` | The evaluator: `eval` for expressions, `exec` for statements, calls, and the `signal` that carries `break`, `return` and exceptions outwards. |
 | `iterators.tsl` | Iteration, a value at a time: `getIter` and `nextValue`, which every loop and every `zip`, `map`, `next`, `in`, … goes through, and generator expressions. |
 | `generators.tsl` | Generators (see below). |
+| `match.tsl` | The `match` statement: which `case` a value fits. |
+| `bytes.tsl` | `bytes` and `bytearray`, the codecs between them and `str`, files of bytes. |
+| `objects.tsl` | Classes beyond the plain case: descriptors, `__slots__`, attribute hooks, `__new__`, abstract methods, metaclasses. |
+| `more.tsl` | Special methods of built-in values by name (`[].__len__()`), `exec` and `eval` in a namespace, a few methods of `str`. |
 | `ops.tsl` | Arithmetic, comparison, `repr`, hashing, attributes, indexing, classes. |
 | `builtins.tsl`, `methods.tsl` | The built-in functions, and the methods of `str`, `list`, `dict`, `set` and files. |
 | `format.tsl` | Format specs, `%` formatting and `str.format`. |
@@ -190,7 +228,7 @@ itself the generator stops, and gives the value. The next `next` or `send`
 goes on from the frames as they were left: what's sent becomes the `yield`'s
 value, and `throw` and `close` raise an exception there instead.
 
-About 14,500 lines of Tessel, and 4,800 of Python in `lib/`. Every `.tsl`
+About 18,800 lines of Tessel, and 5,100 of Python in `lib/`. Every `.tsl`
 file in the folder is part of the program; `tessel.toml` says which version
 of Tessel builds it.
 
