@@ -1,0 +1,136 @@
+7
+4
+4 4
+10
+1
+1 3
+[10, 2, 3]
+matched x attribute
+matched y
+matched z
+0 -> zero
+1 -> small
+3 -> small
+-1 -> minus one
+2.5 -> two and a half
+'hello' -> greeting
+'ab' -> joined
+None -> nothing
+True -> small
+False -> zero
+99 -> other
+'x' -> other
+[] -> other
+0.0 -> zero
+1.0 -> small
+True itself one one else
+pair 1 2
+got 'xy'
+got 7
+42
+wildcard takes nothing
+NameError: name '_' is not defined
+['red', 'cool', 'cool', 'max', 'unknown']
+empty
+one: 1
+one: 1
+two: 1 2
+two: 1 2
+first 1 rest [2, 3]
+first 1 rest [2, 3, 4]
+two: 0 1
+first 0 rest [1, 2, 3, 4]
+None None None None
+ends with zero ends with zero 1..9 around [] 1..9 around [2, 3] starts 4 5 all [7] all []
+open sequence 1 2 3
+nested 1 2 3 4
+string text
+one-tuple 1
+group 5
+empty rest []
+circle 2
+circle 2
+rect 3x4
+other 'line' with {'a': 1, 'b': 2}
+some dict
+some dict
+not a dict
+t two none
+deep 1 2
+k is 1
+origin
+on y axis at 5
+on x axis at 5
+3d 1 2 3
+on y axis at 2
+diagonal 4
+somewhere
+plain 'n' 2
+plain without
+not a point
+bool True
+int 3
+float 2.5
+str 's'
+list [1]
+tuple (1,)
+dict {'a': 1}
+a set
+None
+an object
+number 3
+float() without a pattern
+points 1 4
+in a dict 1 2
+exception bad 2
+direction north
+direction up
+letter a number 1
+letter b number 2
+small 2
+whole [8, 9]
+none
+positive negative zero a float no case
+kept is 10
+before is untouched
+after no match
+['subject', 'three']
+[10, 20]
+missing number
+unknown mul 2
+blank
+13
+1-1 1-other other-1 none
+9 10
+ValueError: no area for blob
+['number', 'word', 'other', 'group of 2', '  part 1', '  part 2', 'number', 'other']
+tuple subject
+starred subject
+half 6
+TypeError: NoArgs() accepts 0 positional sub-patterns (1 given)
+TypeError: BadArgs.__match_args__ must be a tuple (got list)
+TypeError: TwoArgs() got multiple sub-patterns for attribute 'a'
+TypeError: Point() accepts 2 positional sub-patterns (3 given)
+TypeError: Point() got multiple sub-patterns for attribute 'x'
+TypeError: int() accepts 1 positional sub-pattern (2 given)
+TypeError: called match pattern must be a class
+SyntaxError: mapping pattern checks duplicate key ('a') (<string>, line 2)
+no match
+matched
+matched
+SyntaxError: wildcard makes remaining patterns unreachable
+SyntaxError: name capture 'y' makes remaining patterns unreachable
+no error
+SyntaxError: multiple assignments to name 'a' in pattern
+SyntaxError: multiple starred names in sequence pattern
+SyntaxError: alternative patterns bind different names
+SyntaxError: name capture 'a' makes remaining patterns unreachable
+SyntaxError: wildcard makes remaining patterns unreachable
+SyntaxError: name capture 'a' makes remaining patterns unreachable
+SyntaxError: attribute name repeated in class pattern: x
+SyntaxError: positional patterns follow keyword patterns
+SyntaxError: cannot use '_' as a target
+SyntaxError: multiple assignments to name 'a' in pattern
+SyntaxError: multiple assignments to name 'a' in pattern
+fine 1
+no error

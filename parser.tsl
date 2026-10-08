@@ -173,6 +173,13 @@ struct Parser {
             out.append(decorated())
             return
         }
+        if kind() == .name && text() == "match" {
+            let m = matchStatement()
+            if m >= 0 {
+                out.append(m)
+                return
+            }
+        }
         simpleLine(out)
     }
 
@@ -464,6 +471,392 @@ struct Parser {
         }
         let body = block()
         add(.withStmt(items: items, targets: targets, body: body), at)
+    }
+
+    // ---- match ----
+
+    // `match subject:` and its cases, or -1 if the line isn't one: `match`
+    // is a keyword only there, and a name anywhere else (`match = 3`). So
+    // the line is read as a `match`, and if it doesn't turn out to be
+    // one, everything is put back as it was.
+    fn matchStatement() -> Int {
+        let at = line()
+        let savedPos = pos
+        let savedNodes = nodes.count
+        let savedDefs = defs.count
+        let savedYields = yields
+        let savedCount = yieldCount
+        let savedRefs = markRefs()
+        advance()
+        var subject = -1
+        var plain = kind() == .newline || kind() == .eof || augmentedOp() != nil
+        if kind() == .op && ["=", ".", ",", ")", "]", "\}", ":", ";"].contains(text()) {
+            plain = true
+        }
+        if !plain {
+            subject = starExpressionList()
+            if error == "" && isOp(":") && pos + 3 < tokens.count && tokens[pos + 1].kind == .newline &&
+               tokens[pos + 2].kind == .indent && tokens[pos + 3].kind == .name && tokens[pos + 3].text == "case" {
+                pos += 3
+            } else {
+                subject = -1
+            }
+        }
+        if subject < 0 {
+            pos = savedPos
+            while nodes.count > savedNodes {
+                nodes.removeLast()
+                lines.removeLast()
+                yielding.removeLast()
+            }
+            while defs.count > savedDefs {
+                defs.removeLast()
+            }
+            yields = savedYields
+            yieldCount = savedCount
+            resetRefs(savedRefs)
+            error = ""
+            errorLine = 0
+            return -1
+        }
+        var cases: [Int] = []
+        var guards: [Int] = []
+        var patterns: [Int] = []
+        while kind() == .name && text() == "case" && error == "" {
+            let caseLine = line()
+            advance()
+            let pattern = casePatterns()
+            var guard = -1
+            if acceptKw("if") {
+                guard = namedExpression()
+            }
+            let body = block()
+            patterns.append(pattern)
+            guards.append(guard)
+            cases.append(add(.matchCase(pattern: pattern, guard: guard, body: body), caseLine))
+            while kind() == .newline {
+                advance()
+            }
+        }
+        if kind() == .dedent {
+            advance()
+        } else if kind() != .eof {
+            fail("invalid syntax")
+        }
+        // A case that fits everything is only allowed last (or with an `if`).
+        for i in patterns.indices {
+            var names: [String] = []
+            checkPattern(patterns[i], guards[i] >= 0 || i == patterns.count - 1, names)
+            for name in names {
+                bindName(name)
+            }
+        }
+        add(.matchStmt(subject: subject, cases: cases), at)
+    }
+
+    // Checks a pattern as Python's compiler does, and collects the names
+    // it gives values to. `allow` says whether it may fit everything.
+    fn checkPattern(_ p: Int, _ allow: Bool, _ names: bind [String]) {
+        match nodes[p] {
+            .patCapture(name) -> {
+                if !allow {
+                    failAt(if name == "" { "wildcard makes remaining patterns unreachable" } else { "name capture '{name}' makes remaining patterns unreachable" }, lines[p])
+                }
+                patternName(name, p, names)
+            }
+            .patStar(name) -> patternName(name, p, names)
+            .patSequence(items) -> {
+                var stars = 0
+                for i in items {
+                    match nodes[i] {
+                        .patStar(_) -> { stars += 1 }
+                        _ -> {}
+                    }
+                    checkPattern(i, true, names)
+                }
+                if stars > 1 {
+                    failAt("multiple starred names in sequence pattern", lines[p])
+                }
+            }
+            .patMapping(keys, patterns, rest) -> {
+                var seen: [String] = []
+                for k in keys {
+                    var text = ""
+                    match nodes[k] {
+                        .strLit(s) -> { text = strRepr(s) }
+                        .intLit(i) -> { text = "{i}" }
+                        .floatLit(f) -> { text = floatRepr(f) }
+                        .noneLit -> { text = "None" }
+                        .trueLit -> { text = "True" }
+                        .falseLit -> { text = "False" }
+                        _ -> {}
+                    }
+                    if text != "" && seen.contains(text) {
+                        failAt("mapping pattern checks duplicate key ({text})", lines[p])
+                    }
+                    seen.append(text)
+                }
+                for i in patterns {
+                    checkPattern(i, true, names)
+                }
+                patternName(rest, p, names)
+            }
+            .patClass(_, patterns, kw) -> {
+                var seen: [String] = []
+                for i in patterns.indices {
+                    if kw[i] != "" {
+                        if seen.contains(kw[i]) {
+                            failAt("attribute name repeated in class pattern: {kw[i]}", lines[p])
+                        }
+                        seen.append(kw[i])
+                    }
+                    checkPattern(patterns[i], true, names)
+                }
+            }
+            .patOr(options) -> {
+                var first: [String] = []
+                for i in options.indices {
+                    var own: [String] = []
+                    checkPattern(options[i], allow && i == options.count - 1, own)
+                    if i == 0 {
+                        first = own.sorted()
+                    } else if own.sorted() != first {
+                        failAt("alternative patterns bind different names", lines[p])
+                    }
+                }
+                for name in first {
+                    patternName(name, p, names)
+                }
+            }
+            .patAs(inner, name) -> {
+                checkPattern(inner, true, names)
+                patternName(name, p, names)
+            }
+            _ -> {}
+        }
+    }
+
+    fn patternName(_ name: String, _ p: Int, _ names: bind [String]) {
+        if name == "" {
+            return
+        }
+        if names.contains(name) {
+            failAt("multiple assignments to name '{name}' in pattern", lines[p])
+        }
+        names.append(name)
+    }
+
+    // What's after `case`: a pattern, or several with commas (a sequence).
+    fn casePatterns() -> Int {
+        let at = line()
+        let first = starPattern()
+        if !isOp(",") {
+            match nodes[first] {
+                .patStar(_) -> fail("invalid syntax")
+                _ -> {}
+            }
+            return first
+        }
+        var items = [first]
+        while acceptOp(",") && error == "" {
+            if isOp(":") || isKw("if") {
+                break
+            }
+            items.append(starPattern())
+        }
+        add(.patSequence(items: items), at)
+    }
+
+    fn starPattern() -> Int {
+        let at = line()
+        if acceptOp("*") {
+            let name = expectName()
+            return add(.patStar(name: if name == "_" { "" } else { name }), at)
+        }
+        asPattern()
+    }
+
+    fn asPattern() -> Int {
+        let at = line()
+        let p = orPattern()
+        if acceptKw("as") {
+            let name = expectName()
+            if name == "_" {
+                failAt("cannot use '_' as a target", at)
+            }
+            return add(.patAs(pattern: p, name: name), at)
+        }
+        p
+    }
+
+    fn orPattern() -> Int {
+        let at = line()
+        let first = closedPattern()
+        if !isOp("|") {
+            return first
+        }
+        var options = [first]
+        while acceptOp("|") && error == "" {
+            options.append(closedPattern())
+        }
+        add(.patOr(options: options), at)
+    }
+
+    // A number, a string, None/True/False or a dotted name, as an
+    // expression: what a pattern compares with. -1 if there's none here.
+    fn patternValue() -> Int {
+        let at = line()
+        if kind() == .int || kind() == .float {
+            return atom()
+        }
+        if isOp("-") && pos + 1 < tokens.count && (tokens[pos + 1].kind == .int || tokens[pos + 1].kind == .float) {
+            return factor()
+        }
+        if kind() == .str {
+            return strings()
+        }
+        if kind() == .fstr {
+            fail("patterns may only match literals and attribute lookups")
+            return -1
+        }
+        if isKw("None") || isKw("True") || isKw("False") {
+            return atom()
+        }
+        if kind() == .name && nextIsOp(".") {
+            var value = atom()
+            while acceptOp(".") && error == "" {
+                value = add(.attr(object: value, name: expectName()), at)
+            }
+            return value
+        }
+        -1
+    }
+
+    fn closedPattern() -> Int {
+        let at = line()
+        let single = isKw("None") || isKw("True") || isKw("False")
+        let value = patternValue()
+        if error != "" {
+            return 0
+        }
+        if value >= 0 {
+            if isOp("(") {
+                advance()
+                return classPattern(value, at)
+            }
+            return add(if single { Node.patSingleton(value: value) } else { Node.patLiteral(value: value) }, at)
+        }
+        if kind() == .name {
+            if nextIsOp("(") {
+                let cls = atom()
+                advance()
+                return classPattern(cls, at)
+            }
+            let name = text()
+            advance()
+            return add(.patCapture(name: if name == "_" { "" } else { name }), at)
+        }
+        if acceptOp("(") {
+            if acceptOp(")") {
+                return add(.patSequence(items: []), at)
+            }
+            let first = starPattern()
+            var isStar = false
+            match nodes[first] {
+                .patStar(_) -> { isStar = true }
+                _ -> {}
+            }
+            if !isOp(",") && !isStar {
+                // (pattern): only brackets around it.
+                expectOp(")")
+                return first
+            }
+            var items = [first]
+            while acceptOp(",") && error == "" {
+                if isOp(")") {
+                    break
+                }
+                items.append(starPattern())
+            }
+            expectOp(")")
+            return add(.patSequence(items: items), at)
+        }
+        if acceptOp("[") {
+            var items: [Int] = []
+            while !isOp("]") && error == "" {
+                items.append(starPattern())
+                if !acceptOp(",") {
+                    break
+                }
+            }
+            expectOp("]")
+            return add(.patSequence(items: items), at)
+        }
+        if acceptOp("\{") {
+            var keys: [Int] = []
+            var patterns: [Int] = []
+            var rest = ""
+            while !isOp("\}") && error == "" {
+                if acceptOp("**") {
+                    rest = expectName()
+                } else {
+                    let key = patternValue()
+                    if key < 0 {
+                        fail("mapping pattern keys may only match literals and attribute lookups")
+                        break
+                    }
+                    keys.append(key)
+                    expectOp(":")
+                    patterns.append(asPattern())
+                }
+                if !acceptOp(",") {
+                    break
+                }
+            }
+            expectOp("\}")
+            return add(.patMapping(keys: keys, patterns: patterns, rest: rest), at)
+        }
+        fail("invalid syntax")
+        advance()
+        0
+    }
+
+    // Point(0, y=1), after its `(`.
+    fn classPattern(_ cls: Int, _ at: Int) -> Int {
+        var patterns: [Int] = []
+        var names: [String] = []
+        var named = false
+        while !isOp(")") && error == "" {
+            if kind() == .name && nextIsOp("=") {
+                names.append(text())
+                advance()
+                advance()
+                patterns.append(asPattern())
+                named = true
+            } else {
+                if named {
+                    fail("positional patterns follow keyword patterns")
+                }
+                names.append("")
+                patterns.append(asPattern())
+            }
+            if !acceptOp(",") {
+                break
+            }
+        }
+        expectOp(")")
+        add(.patClass(cls: cls, patterns: patterns, names: names), at)
+    }
+
+    // (Scopes: filled in with the rules of local variables.)
+    fn markRefs() -> Int {
+        0
+    }
+
+    fn resetRefs(_ mark: Int) {
+    }
+
+    fn bindName(_ name: String) {
     }
 
     fn augmentedOp() -> BinOp? {

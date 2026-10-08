@@ -1167,6 +1167,12 @@ struct Interp {
                 }
             }
             .withStmt(items, targets, body) -> withStatement(items, targets, body, 0)
+            .matchStmt(subject, cases) -> {
+                let body = matchChoose(self, subject, cases)
+                if signal == .none {
+                    execBlock(body)
+                }
+            }
             _ -> {
                 eval(n)
             }

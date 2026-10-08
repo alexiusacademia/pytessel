@@ -71,6 +71,30 @@ enum Node {
     importStmt(names: [String], aliases: [String])
     fromImport(module: String, names: [String], aliases: [String])
     withStmt(items: [Int], targets: [Int], body: [Int])
+    // match subject: followed by its `matchCase`s.
+    matchStmt(subject: Int, cases: [Int])
+    // case pattern if guard: body  (`guard` is -1 for none).
+    matchCase(pattern: Int, guard: Int, body: [Int])
+
+    // ---- patterns (of a `case`) ----
+    // A number, a string or a dotted name: fits what's equal to it.
+    patLiteral(value: Int)
+    // None, True or False: fits that very value.
+    patSingleton(value: Int)
+    // A name, which takes the value ("" for `_`, which takes nothing).
+    patCapture(name: String)
+    // [a, b, *rest] or (a, b).
+    patSequence(items: [Int])
+    // *rest in a sequence ("" for `*_`).
+    patStar(name: String)
+    // {"key": pattern, **rest}; `rest` is "" for none.
+    patMapping(keys: [Int], patterns: [Int], rest: String)
+    // Point(0, y=1): `names` has "" for a pattern given by position.
+    patClass(cls: Int, patterns: [Int], names: [String])
+    // a | b
+    patOr(options: [Int])
+    // pattern as name
+    patAs(pattern: Int, name: String)
 }
 
 // A `def` or a `lambda`: its parameters and body.

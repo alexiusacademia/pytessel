@@ -1,0 +1,301 @@
+// The `match` statement: which `case` a value fits, and the names its
+// pattern gives values to.
+
+// Works out a `match`'s subject and gives the body of the first case
+// whose pattern fits it and whose `if` holds (nothing if no case does).
+fn matchChoose(_ it: bind Interp, _ subject: Int, _ cases: [Int]) -> [Int] {
+    let v = it.eval(subject)
+    if it.signal != .none {
+        return []
+    }
+    for c in cases {
+        match it.prog.nodes[c] {
+            .matchCase(pattern, guard, body) -> {
+                it.line = it.prog.lines[c]
+                // (Names get their values only once the whole pattern fits.)
+                var names: [String] = []
+                var values: [Value] = []
+                let fits = matchPattern(it, pattern, v, names, values)
+                if it.signal != .none {
+                    return []
+                }
+                if !fits {
+                    continue
+                }
+                for i in names.indices {
+                    it.setVar(names[i], values[i])
+                }
+                if guard >= 0 {
+                    let g = it.eval(guard)
+                    if it.signal != .none {
+                        return []
+                    }
+                    let yes = truthy(it, g)
+                    if it.signal != .none {
+                        return []
+                    }
+                    if !yes {
+                        continue
+                    }
+                }
+                return body
+            }
+            _ -> {}
+        }
+    }
+    []
+}
+
+// Whether `v` fits the pattern `p`; the names the pattern takes are added
+// to `names`, with their values in `values`.
+fn matchPattern(_ it: bind Interp, _ p: Int, _ v: Value, _ names: bind [String], _ values: bind [Value]) -> Bool {
+    match it.prog.nodes[p] {
+        .patCapture(name) -> {
+            if name != "" {
+                names.append(name)
+                values.append(v)
+            }
+            return true
+        }
+        .patLiteral(value) -> {
+            let wanted = it.eval(value)
+            if it.signal != .none {
+                return false
+            }
+            return pyEquals(it, v, wanted)
+        }
+        .patSingleton(value) -> {
+            let wanted = it.eval(value)
+            return v == wanted
+        }
+        .patAs(inner, name) -> {
+            if !matchPattern(it, inner, v, names, values) {
+                return false
+            }
+            names.append(name)
+            values.append(v)
+            return true
+        }
+        .patOr(options) -> {
+            let mark = names.count
+            for o in options {
+                if matchPattern(it, o, v, names, values) {
+                    return true
+                }
+                if it.signal != .none {
+                    return false
+                }
+                while names.count > mark {
+                    names.removeLast()
+                    values.removeLast()
+                }
+            }
+            return false
+        }
+        .patSequence(items) -> { return matchSequence(it, items, v, names, values) }
+        .patMapping(keys, patterns, rest) -> { return matchMapping(it, keys, patterns, rest, v, names, values) }
+        .patClass(cls, patterns, kw) -> { return matchClass(it, cls, patterns, kw, v, names, values) }
+        _ -> {}
+    }
+    false
+}
+
+// [a, b, *rest]: lists, tuples and ranges fit (text doesn't).
+fn matchSequence(_ it: bind Interp, _ items: [Int], _ v: Value, _ names: bind [String], _ values: bind [Value]) -> Bool {
+    var sequence: [Value] = []
+    match v {
+        .list(id) -> { sequence = it.lists[id] }
+        .tuple(id) -> { sequence = it.lists[id] }
+        .range(_, _, _) -> { sequence = iterate(it, v) }
+        _ -> { return false }
+    }
+    var star = -1
+    for i in items.indices {
+        match it.prog.nodes[items[i]] {
+            .patStar(_) -> { star = i }
+            _ -> {}
+        }
+    }
+    if star < 0 {
+        if sequence.count != items.count {
+            return false
+        }
+        for i in items.indices {
+            if !matchPattern(it, items[i], sequence[i], names, values) {
+                return false
+            }
+        }
+        return true
+    }
+    let after = items.count - star - 1
+    if sequence.count < items.count - 1 {
+        return false
+    }
+    for i in 0..star {
+        if !matchPattern(it, items[i], sequence[i], names, values) {
+            return false
+        }
+    }
+    match it.prog.nodes[items[star]] {
+        .patStar(name) -> {
+            if name != "" {
+                names.append(name)
+                values.append(it.newList(sequence.slice(from: star, to: sequence.count - after)))
+            }
+        }
+        _ -> {}
+    }
+    for i in 0..after {
+        if !matchPattern(it, items[star + 1 + i], sequence[sequence.count - after + i], names, values) {
+            return false
+        }
+    }
+    true
+}
+
+// {"key": pattern, **rest}: a dictionary that has the keys.
+fn matchMapping(_ it: bind Interp, _ keys: [Int], _ patterns: [Int], _ rest: String, _ v: Value,
+                _ names: bind [String], _ values: bind [Value]) -> Bool {
+    match v {
+        .dict(id) -> {
+            var used: [String] = []
+            for i in keys.indices {
+                let k = it.eval(keys[i])
+                if it.signal != .none {
+                    return false
+                }
+                let h = hashKey(it, k)
+                if it.signal != .none {
+                    return false
+                }
+                if used.contains(h) {
+                    it.throw("ValueError", "mapping pattern checks duplicate key ({toRepr(it, k)})")
+                    return false
+                }
+                used.append(h)
+            }
+            for i in keys.indices {
+                if let at = it.dicts[id].index[used[i]] {
+                    let item = it.dicts[id].vals[at]
+                    if !matchPattern(it, patterns[i], item, names, values) {
+                        return false
+                    }
+                } else {
+                    return false
+                }
+            }
+            if rest != "" {
+                let others = it.newDict()
+                let allKeys = dictKeys(it.dicts[id])
+                let allValues = dictValues(it.dicts[id])
+                for i in allKeys.indices {
+                    let h = hashKey(it, allKeys[i])
+                    if !used.contains(h) {
+                        dictSet(it.dicts[others], allKeys[i], h, allValues[i])
+                    }
+                }
+                names.append(rest)
+                values.append(.dict(id: others))
+            }
+            true
+        }
+        _ -> false
+    }
+}
+
+// Point(0, y=1): an object of the class whose attributes fit.
+fn matchClass(_ it: bind Interp, _ cls: Int, _ patterns: [Int], _ kw: [String], _ v: Value,
+              _ names: bind [String], _ values: bind [Value]) -> Bool {
+    let c = it.eval(cls)
+    if it.signal != .none {
+        return false
+    }
+    var className = ""
+    // (int(x), str(x), …: the one pattern is for the value itself.)
+    var itself = false
+    var matchArgs = Value.absent
+    match c {
+        .builtin(name) -> {
+            if !isTypeName(name) {
+                it.throw("TypeError", "called match pattern must be a class")
+                return false
+            }
+            className = name
+            itself = ["bool", "bytearray", "bytes", "dict", "float", "frozenset", "int", "list", "set", "str", "tuple"].contains(name)
+        }
+        .klass(id) -> {
+            className = it.classes[id].name
+            matchArgs = classAttr(it, id, "__match_args__")
+        }
+        _ -> {
+            it.throw("TypeError", "called match pattern must be a class")
+            return false
+        }
+    }
+    if !isInstance(it, v, c) {
+        return false
+    }
+    var positional = 0
+    for k in kw {
+        if k == "" {
+            positional += 1
+        }
+    }
+    var attributes: [String] = []
+    if positional > 0 && !itself {
+        var allowed: [Value] = []
+        match matchArgs {
+            .tuple(id) -> { allowed = it.lists[id] }
+            .absent -> {}
+            _ -> {
+                it.throw("TypeError", "{className}.__match_args__ must be a tuple (got {typeName(it, matchArgs)})")
+                return false
+            }
+        }
+        if positional > allowed.count {
+            let s = if allowed.count == 1 { "" } else { "s" }
+            it.throw("TypeError", "{className}() accepts {allowed.count} positional sub-pattern{s} ({positional} given)")
+            return false
+        }
+        for i in 0..positional {
+            match allowed[i] {
+                .str(s) -> { attributes.append(s) }
+                _ -> {
+                    it.throw("TypeError", "__match_args__ elements must be strings (got {typeName(it, allowed[i])})")
+                    return false
+                }
+            }
+        }
+    } else if positional > 1 {
+        it.throw("TypeError", "{className}() accepts 1 positional sub-pattern ({positional} given)")
+        return false
+    }
+    var seen: [String] = []
+    for i in patterns.indices {
+        if kw[i] == "" && itself {
+            if !matchPattern(it, patterns[i], v, names, values) {
+                return false
+            }
+            continue
+        }
+        let attribute = if kw[i] != "" { kw[i] } else { attributes[i] }
+        if seen.contains(attribute) {
+            it.throw("TypeError", "{className}() got multiple sub-patterns for attribute '{attribute}'")
+            return false
+        }
+        seen.append(attribute)
+        let item = getAttr(it, v, attribute)
+        if it.signal != .none {
+            // (No such attribute: the pattern doesn't fit.)
+            if it.signal == .raising && exceptionMatches(it, it.exc, .klass(id: it.classIds["AttributeError"] ?? -1)) {
+                it.signal = .none
+                it.exc = .none
+            }
+            return false
+        }
+        if !matchPattern(it, patterns[i], item, names, values) {
+            return false
+        }
+    }
+    true
+}
