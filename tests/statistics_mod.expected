@@ -1,0 +1,91 @@
+2.8
+2.5
+2
+10
+2.625
+0.1
+1.75
+50.5
+3
+6
+0.75
+2e+300 2e-300
+0 7.5 -7.5
+0.2916666666666667 5.333333333333333 3.0
+int float float
+mean empty StatisticsError: mean requires at least one data point
+mean text TypeError: can't convert type 'str' to numerator/denominator
+2.5
+4.25
+2.0
+0.1
+4.5
+0.3333333333333333
+float
+fmean empty StatisticsError: fmean requires at least one data point
+36.0 4.0 2.828427125
+geometric_mean empty StatisticsError: geometric mean requires a non-empty dataset containing positive numbers
+geometric_mean zero StatisticsError: geometric mean requires a non-empty dataset containing positive numbers
+geometric_mean negative StatisticsError: geometric mean requires a non-empty dataset containing positive numbers
+3
+4.0
+3
+7
+1.5
+2.5
+3.5
+b
+4.5 5
+3 3 4 1
+3 5 4 2
+b x
+median empty StatisticsError: no median for empty data
+median_low empty StatisticsError: no median for empty data
+median_high empty StatisticsError: no median for empty data
+3
+red
+1
+5
+b
+1.5 (1, 2)
+['b', 'd', 'f']
+[1, 2, 3]
+[]
+[1, 2]
+['i', 's']
+mode empty StatisticsError: no mode for empty data
+1.3720238095238095
+1.171334200612195
+1.1760204081632653
+1.084444746477784
+2.5 2
+1.6666666666666667 1.25
+4.571428571428571 4
+2.138089935299395 2.0
+0 0 0.0 0.0
+1.6666666666666667 1.25
+0.5 0.7071067811865476 0.25 0.5
+50 7.0710678118654755 2 1.4142135623730951
+0.5 0.25 0 0.0
+9.166666666666666 8.25 3.0276503540974917 2.8722813232690143
+1.16875 1.0810874155219827
+1.25 0.986893273527251
+10000 2.5 2
+2.3333333333333335 2.9166666666666665 1.5555555555555556
+1.0 0.3333333333333333
+1.3720238095238095 1.1760204081632653 1.171334200612195 1.084444746477784
+2 1.5 1.6666666666666667 0.6666666666666666
+1.5811388301 1.4142135624
+int float int
+variance one StatisticsError: variance requires at least two data points
+variance empty StatisticsError: variance requires at least two data points
+stdev one StatisticsError: variance requires at least two data points
+pvariance empty StatisticsError: pvariance requires at least one data point
+pstdev empty StatisticsError: pvariance requires at least one data point
+variance text TypeError: can't convert type 'str' to numerator/denominator
+ann 83.33333333333333 82 5.793 14
+bob 78.75 79.0 11.476 27
+cy 100 100 0.0 0
+83.125 85.0 82 11.8856
+True True
+caught as ValueError: mean requires at least one data point

@@ -1,0 +1,229 @@
+<re.Match object; span=(0, 3), match='aaa'> None <re.Match object; span=(1, 4), match='aaa'>
+123 <re.Match object; span=(0, 3), match='123'> None 123a
+['hello', 'big', 'world'] [] ['', '', '']
+example at joe and home at ann ('a b c', 2)
+['a', 'b', 'c', 'd'] ['a', 'b', 'c'] ['abc']
+['e', 'u', 'a', 'i', 'o'] [1, 2, 5, 6]
+2024-05-17 2024-05-17 2024 2024 05 17 ('2024', '17') ('05', '2024', '2024-05-17')
+('2024', '05', '17') {'year': '2024', 'month': '05'} (0, 10) 0 10 (5, 7) 5 10 3 None
+2024-05-17 and more 0 19 (?P<year>\d{4})-(?P<month>\d\d)-(\d\d) True 17/05/2024 2024 2024 <re.Match object; span=(0, 10), match='2024-05-17'>
+(None, 'b') ('-', 'b') 2 1
+(-1, -1) -1 None {'n': 'none'}
+None None () {} None
+['', 'aa', '', ''] ['', 'a', '', 'b', 'c', ''] -a-b--d- -a-b-c-
+['', '', '', ''] ['', 'ab', ' ', 'cd', ''] a-b-c d-e >a
+>b
+[(0, 0), (1, 2), (2, 3), (3, 3), (4, 4)] ['', 'a', '', 'a', ''] ----- ['', 'a', 'b', 'c', '']
+['', '12', '', '3', ''] #a##b## ['a', 'ba', 'b'] ['', ''] ab!
+!
+[('a', '1'), ('b', ''), ('c', '2')] ['a', 'b'] ['1', '']
+['a', '-', None, 'b', None, '+', 'c'] ['a', ' ', 'b', '  ', 'c'] ['', 'a', 'b  c '] ['a', 'b c']
+[('1', '2'), ('33', '44')] [('ab', 'a', 'b'), ('a', 'a', '')] ['x', 'a', 'b', 'y', 'a', None, '']
+'a{2,3}' 'aaaa' -> 'aaa' (0, 3) ()
+'a{2,3}?' 'aaaa' -> 'aa' (0, 2) ()
+'a{,2}' 'aaa' -> 'aa' (0, 2) ()
+'a{2,}' 'aaaaa' -> 'aaaaa' (0, 5) ()
+'a{2}' 'aaa' -> 'aa' (0, 2) ()
+'a{0}b' 'ab' -> 'b' (1, 2) ()
+'<.*>' '<a><b>' -> '<a><b>' (0, 6) ()
+'<.*?>' '<a><b>' -> '<a>' (0, 3) ()
+'a+?' 'aaa' -> 'a' (0, 1) ()
+'a??b' 'ab' -> 'ab' (0, 2) ()
+'x{}' 'x{}' -> 'x{}' (0, 3) ()
+'x{a}' 'x{a}' -> 'x{a}' (0, 4) ()
+'x{1,2' 'x{1,2' -> 'x{1,2' (0, 5) ()
+'(ab)*' 'ababa' -> 'abab' (0, 4) ('ab',)
+'(a|ab)(c|bcd)(d*)' 'abcd' -> 'abcd' (0, 4) ('a', 'bcd', '')
+'(a*)*' 'b' -> '' (0, 0) ('',)
+'(a*)+' 'b' -> '' (0, 0) ('',)
+'(a|b)*?c' 'abac' -> 'abac' (0, 4) ('a',)
+'(?:a|b)+' 'abba' -> 'abba' (0, 4) ()
+'(a+)+b' 'aaab' -> 'aaab' (0, 4) ('aaa',)
+'(a?)*' 'aa' -> 'aa' (0, 2) ('',)
+'(a?)+?b' 'aab' -> 'aab' (0, 3) ('a',)
+'(\\d{1,3})(,\\d{3})*' '1,234,567 x' -> '1,234,567' (0, 9) ('1', ',567')
+'\\d{3}-\\d{4}' 'call 555-1234 now' -> '555-1234' (5, 13) ()
+'(a|b){2}' 'abab' -> 'ab' (0, 2) ('b',)
+'a*?b*?c' 'aabbc' -> 'aabbc' (0, 5) ()
+'(a+|b+)*c' 'aabbaac' -> 'aabbaac' (0, 7) ('aa',)
+'(?:(a)|(b))+' 'ab' -> 'ab' (0, 2) ('a', 'b')
+'.{3}' 'ab\ncdef' -> 'cde' (3, 6) ()
+'a{3,5}?a' 'aaaaaa' -> 'aaaa' (0, 4) ()
+'(a{1,2}){2}' 'aaaa' -> 'aaaa' (0, 4) ('aa',)
+'x*' '' -> '' (0, 0) ()
+'x+' '' -> no match
+'(|a)+' 'aa' -> '' (0, 0) ('',)
+'(a|)+' 'aa' -> 'aa' (0, 2) ('',)
+'\\w{2,3}?\\b' 'abcd ef' -> 'bcd' (1, 4) ()
+'[a-c]+' 'abcd' -> 'abc' (0, 3) ()
+'[^a-c]+' 'xyzabc' -> 'xyz' (0, 3) ()
+'[]a]+' ']a]' -> ']a]' (0, 3) ()
+'[^]a]+' 'xy]' -> 'xy' (0, 2) ()
+'[a\\-z]+' 'a-z' -> 'a-z' (0, 3) ()
+'[\\d.]+' '3.14x' -> '3.14' (0, 4) ()
+'[\\w-]+' 'ab-c d' -> 'ab-c' (0, 4) ()
+'[a-]+' 'a-a' -> 'a-a' (0, 3) ()
+'[-a]+' 'a-a' -> 'a-a' (0, 3) ()
+'[\\]]+' ']]' -> ']]' (0, 2) ()
+'[\\s\\S]+' 'a\nb' -> 'a\nb' (0, 3) ()
+'[^\\W\\d_]+' 'abc1' -> 'abc' (0, 3) ()
+'[\\x41-\\x43]+' 'ABCD' -> 'ABC' (0, 3) ()
+'[\\n]' '\n' -> '\n' (0, 1) ()
+'[.]' '.' -> '.' (0, 1) ()
+'[.]' 'a' -> no match
+'\\D+' 'ab1' -> 'ab' (0, 2) ()
+'\\S+' 'ab c' -> 'ab' (0, 2) ()
+'\\W+' ', !a' -> ', !' (0, 3) ()
+'[A-Za-z_][A-Za-z0-9_]*' '9 _x9 y' -> '_x9' (2, 5) ()
+'[+*?.()|^$]+' 'a+*?.()|^$b' -> '+*?.()|^$' (1, 10) ()
+'[^\\n]+' 'ab\ncd' -> 'ab' (0, 2) ()
+'[a-zA-Z]+\\d' 'abc5' -> 'abc5' (0, 4) ()
+'[\\[\\]]' 'a[b' -> '[' (1, 2) ()
+'[a^]+' '^a^' -> '^a^' (0, 3) ()
+'[^^]+' 'ab^' -> 'ab' (0, 2) ()
+'[\\\\]+' 'a\\\\b' -> '\\\\' (1, 3) ()
+'[\\t ]+' 'a \t b' -> ' \t ' (1, 4) ()
+'[0-9a-fA-F]+' 'xDEADbeef!' -> 'DEADbeef' (1, 9) ()
+'[\\u00e0-\\u00ff]+' 'café' -> 'é' (3, 4) ()
+'[{}]' 'a{b' -> '{' (1, 2) ()
+'\\.' 'a.b' -> '.' (1, 2) ()
+'\\\\' 'a\\b' -> '\\' (1, 2) ()
+'\\$\\d+' 'cost $15' -> '$15' (5, 8) ()
+'\\(\\w+\\)' 'f(x)' -> '(x)' (1, 4) ()
+'a\\+b' 'a+b' -> 'a+b' (0, 3) ()
+'\\x41\\u0042' 'AB' -> 'AB' (0, 2) ()
+'\\t\\n' 'a\t\nb' -> '\t\n' (1, 3) ()
+'\\d\\D\\s\\S\\w\\W' '1a b_!' -> '1a b_!' (0, 6) ()
+'\\/\\-\\@' '/-@' -> '/-@' (0, 3) ()
+'\\141' 'a' -> 'a' (0, 1) ()
+'\\101\\102' 'AB' -> 'AB' (0, 2) ()
+'a\\ b' 'a b' -> 'a b' (0, 3) ()
+'\\#' '#' -> '#' (0, 1) ()
+'\\{2\\}' '{2}' -> '{2}' (0, 3) ()
+'\\^\\|' '^|' -> '^|' (0, 2) ()
+['ab'] ['ab', 'ef'] ['gh'] ['cd', 'gh']
+['cd'] (0, 2) None (3, 5) None ['a'] ['b']
+['abc'] ['abc', 'a\nc'] ['ABC', 'a\nc']
+['Hello', 'HELLO', 'hello'] ['AbC'] ['Ab', 'ab'] ['ab', 'Ab']
+['b', 'b'] ['MiXeD'] a-b- ['a', 'b'] (0, 7)
+['12 ab', '3cd'] ['ab c #']
+(2, 3) (0, 3) (2, 3) ['One', 'THREE']
+['foo', 'foo'] ['oo'] ['h', 'b', 'w'] The Quick Fox
+(0, 3) ['naïve', 'café'] ['é', 'É'] ['na', 've', 'caf'] ['12', '34']
+58 32 34 256 104
+True True True True True 10
+ll 'hi' ['the', 'sat']
+(0, 4) None aA abcd
+['a', 'b'] ['ef'] ['q'] ['q']
+['10', '30'] ['20'] aX cb aX ['a', 'b', 'c']
+('aaa',) a ('a',) ['e', 'e']
+1,234,567 ['cat', 'dog'] undo ['', '']
+['One.', 'Two!', 'Three?', 'Four'] dog concat cats dog. abab
+['Smith', 'Jones'] <re.Match object; span=(1, 2), match='c'> (0, 1) None (2, 3)
+a<1>b<22> a11 True a0
+[a][b] ('bba', 2) baa bnn  ('abc', 0)
+a2 b44 c666 world hello
+world hello  many spaces here  *d*c*tion
+badcfe 12c a/b/c a\b skip
+a[]c a[b] && aab aa True aA
+a1b2c3 [3] bnn AabB
+Dear Ann, your order #42 ships ?.
+'(' error: missing ), unterminated subpattern at position 0 | missing ), unterminated subpattern 0 1 1 True
+')' error: unbalanced parenthesis at position 0 | unbalanced parenthesis 0 1 1 True
+'a**' error: multiple repeat at position 2 | multiple repeat 2 1 3 True
+'*a' error: nothing to repeat at position 0 | nothing to repeat 0 1 1 True
+'[a' error: unterminated character set at position 0 | unterminated character set 0 1 1 True
+'\\q' error: bad escape \q at position 0 | bad escape \q 0 1 1 True
+'(?P<a>x)(?P<a>y)' error: redefinition of group name 'a' as group 2; was group 1 at position 12 | redefinition of group name 'a' as group 2; was group 1 12 1 13 True
+'(?P=x)' error: unknown group name 'x' at position 4 | unknown group name 'x' 4 1 5 True
+'\\1' error: invalid group reference 1 at position 1 | invalid group reference 1 1 1 2 True
+'(a)\\2' error: invalid group reference 2 at position 4 | invalid group reference 2 4 1 5 True
+'[z-a]' error: bad character range z-a at position 1 | bad character range z-a 1 1 2 True
+'a{3,1}' error: min repeat greater than max repeat at position 2 | min repeat greater than max repeat 2 1 3 True
+'(?<=a+)b' error: look-behind requires fixed-width pattern | look-behind requires fixed-width pattern None None None False
+'(?z)' error: unknown extension ?z at position 1 | unknown extension ?z 1 1 2 True
+'(?P<1a>x)' error: bad character in group name '1a' at position 4 | bad character in group name '1a' 4 1 5 True
+'(?P<a' error: missing >, unterminated name at position 4 | missing >, unterminated name 4 1 5 True
+'(?' error: unexpected end of pattern at position 2 | unexpected end of pattern 2 1 3 True
+'x(?#c' error: missing ), unterminated comment at position 1 | missing ), unterminated comment 1 1 2 True
+'a\\' error: bad escape (end of pattern) at position 1 | bad escape (end of pattern) 1 1 2 True
+'(?P<a>x)(?P=a' error: missing ), unterminated name at position 12 | missing ), unterminated name 12 1 13 True
+'(a\\1)' error: cannot refer to an open group at position 2 | cannot refer to an open group 2 1 3 True
+'+' error: nothing to repeat at position 0 | nothing to repeat 0 1 1 True
+'a|*' error: nothing to repeat at position 2 | nothing to repeat 2 1 3 True
+'(?Px)' error: unknown extension ?Px at position 1 | unknown extension ?Px 1 1 2 True
+'(?<x)' error: unknown extension ?<x at position 1 | unknown extension ?<x 1 1 2 True
+'[\\d-a]' error: bad character range \d-a at position 1 | bad character range \d-a 1 1 2 True
+'a\n(' error: missing ), unterminated subpattern at position 2 (line 2, column 1) | missing ), unterminated subpattern 2 2 1 True
+'{1}' error: nothing to repeat at position 0 | nothing to repeat 0 1 1 True
+'a{1}{2}' error: multiple repeat at position 4 | multiple repeat 4 1 5 True
+'^*' error: nothing to repeat at position 1 | nothing to repeat 1 1 2 True
+'$?' error: nothing to repeat at position 1 | nothing to repeat 1 1 2 True
+'\\x4' error: incomplete escape \x4 at position 0 | incomplete escape \x4 0 1 1 True
+'[a-\\d]' error: bad character range a-\d at position 1 | bad character range a-\d 1 1 2 True
+'a)b' error: unbalanced parenthesis at position 1 | unbalanced parenthesis 1 1 2 True
+'((a)' error: missing ), unterminated subpattern at position 0 | missing ), unterminated subpattern 0 1 1 True
+'[]' error: unterminated character set at position 0 | unterminated character set 0 1 1 True
+'a++' error: multiple repeat at position 2 | multiple repeat 2 1 3 True
+'(?P<>x)' error: missing group name at position 4 | missing group name 4 1 5 True
+'\\8' error: invalid group reference 8 at position 1 | invalid group reference 8 1 1 2 True
+'(?<!a*)b' error: look-behind requires fixed-width pattern | look-behind requires fixed-width pattern None None None False
+'a{2}*' error: multiple repeat at position 4 | multiple repeat 4 1 5 True
+'(?:' error: missing ), unterminated subpattern at position 0 | missing ), unterminated subpattern 0 1 1 True
+'[b-a]' error: bad character range b-a at position 1 | bad character range b-a 1 1 2 True
+'\\N' error: missing { at position 2 | missing { 2 1 3 True
+'a?*' error: multiple repeat at position 2 | multiple repeat 2 1 3 True
+'(?P<n>a)(?P=m)' error: unknown group name 'm' at position 12 | unknown group name 'm' 12 1 13 True
+'abc\\\\' ok
+'\\\\' ok
+error: invalid group reference 2 at position 1
+error: missing >, unterminated name at position 3
+error: bad escape \q at position 0
+error: missing < at position 2
+error: missing group name at position 3
+error: invalid group reference 2 at position 3
+error: bad escape (end of pattern) at position 0
+error: bad character in group name 'a-b' at position 3
+IndexError: no such group
+IndexError: no such group
+IndexError: no such group
+IndexError: no such group
+IndexError: no such group
+IndexError: no such group
+IndexError: unknown group name 'x'
+TypeError
+TypeError
+TypeError
+TypeError
+TypeError
+ValueError: cannot process flags argument with a compiled pattern
+True a
+(\d+)-(?P<b>\d+) 34 2 {'b': 2} re.compile('(\\d+)-(?P<b>\\d+)', re.IGNORECASE) re.compile('a') re.compile('a', re.MULTILINE|re.DOTALL) re.compile('\\d+\\s', re.VERBOSE)
+('12', '34') (2, 5) 1-2 None 1-2
+[('3', '4')] # # ['a', '1', '2', 'b'] (0, 3) ('# #', 2) (1, 4)
+['2', '40'] [(4, 9)] 2-1 2 ['', '1', '2', 'x3-4y']
+True 2 None None (0, 5) (0, 5) None
+['one', 'two', 'three'] 2 None hi None 50
+True False True 1
+a\.b\*c\ \[d\]\ 100% https://x\.y/z\?q=1\&r=2  plain_text\-1 1+1=2?
+True ['a', 'b', 'c'] None
+120 160 The quick brown fox  41 80
+[2, 3, 1, 3, 3, 2, 3, 1, 3] ['x', '=', '3.5', '*', '(', 'y', '+', '12', ')']
+[('NAME', 'rate'), ('OP', '='), ('OP', '('), ('NAME', 'base'), ('OP', '+'), ('NUMBER', '2.5'), ('OP', ')'), ('OP', '*'), ('NUMBER', '10'), ('BAD', '?')]
+[('2024-01-02', 'disk full'), ('2024-01-04', 'net down')] {'date': '2024-01-03', 'level': 'INFO'}
+('key', 'some value') ('port', '8080')
+[True, False, True, False, False]
+['192.168.1.254', '10.0.0.1']
+['#fff', '#12AB9f'] ['a', 'b', 'br'] Hi there
+['3', '-2.5', '1e10', '.5e-3'] ['Alice', 'Bob', 'Paris']
+camel_case_name snakeCaseName 1,234,567.891
+['a', 'b', 'c', 'd'] {'a': '1', 'b': 'two', 'c': '3'} True
+['hi \\"there\\"', 'bye'] ('https', 'example.com', '8080', '/a/b?c=d')
+trim me > line one
+> line two a
+b ['/* one */', '/* two\nlines */']
+('512', 'MB') {'h': '9', 'm': '05', 's': None}
+["it's", 'the', 'end', 'of', 'the', 'world', 'as', 'we', 'know', 'it', 'and', 'i', 'feel', 'fine'] 14 ['and', 'end', 'the']
+None None None
+5000 10000 10000 None 5000 5001
+3000 4000 None 5001

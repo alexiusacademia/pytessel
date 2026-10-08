@@ -79,6 +79,12 @@ struct Interp {
     sources: [String: String] = [:]
     host: Host = NoHost()
 
+    // The attributes set on functions (`f.__name__ = …`, `f.cache_clear`):
+    // for a function of `closures`, the dictionary of `dicts` they're in.
+    funcAttrs: [Int: Int] = [:]
+    // The regular expressions `re` has compiled (regex.tsl).
+    rx: RxStore = RxStore()
+
     // Counts a statement or a call against the budget. False (with
     // TimeoutError raised) when there's none left: everything after it
     // fails the same way, so the program can only end.

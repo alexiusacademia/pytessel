@@ -8,3 +8,6 @@
 tests/*.actual
 /pytessel-*
 __pycache__/
+
+# Worktrees of agents working on the project.
+.claude/

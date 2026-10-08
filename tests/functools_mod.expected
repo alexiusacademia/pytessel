@@ -1,0 +1,62 @@
+10
+120
+start
+9
+[1, 2, 3]
+TypeError
+25 8 49
+1024 [1, 2, 4, 8, 16]
+True (2,) {} () {'exponent': 2}
+Hello, Ann! Hello, Bob? Hello, Cy.
+Hello, Dee. True ('Hello',) {'punctuation': '.'}
+Hello, Eve…
+[5, 7, 5, 9]
+['A', 'b', 'c']
+10 520 3.14
+[3, 2, 1]
+True ((1, 2, 4), {'x': 3, 'y': 5})
+a-b
+TypeError the first argument must be callable
+TypeError
+TypeError power() got multiple values for argument 'exponent'
+832040 31 832040 31
+CacheInfo(hits=29, misses=31, maxsize=None, currsize=31)
+fib 2
+CacheInfo(hits=0, misses=0, maxsize=None, currsize=0)
+55 CacheInfo(hits=8, misses=11, maxsize=None, currsize=11)
+4 4 6 4 [('double', 2), ('double', 3)]
+CacheInfo(hits=2, misses=2, maxsize=128, currsize=2) double
+{'maxsize': 128, 'typed': False}
+3 3 CacheInfo(hits=1, misses=1, maxsize=128, currsize=1)
+10 20 10 30 20 10
+[1, 2, 3, 2, 1] CacheInfo(hits=1, misses=5, maxsize=2, currsize=2)
+1 5 2 2
+1 1 [1, 1] CacheInfo(hits=0, misses=2, maxsize=0, currsize=0)
+3 3 3 3 3 3 3 3
+6 CacheInfo(hits=2, misses=6, maxsize=8, currsize=6)
+1 1.0 1 [1, 1.0] CacheInfo(hits=1, misses=2, maxsize=None, currsize=2)
+TypeError unhashable type: 'list'
+TypeError Expected first argument to be an integer, a callable, or None
+3628800 479001600 CacheInfo(hits=1, misses=13, maxsize=None, currsize=13)
+16 16 25 ['area', 'area']
+171 111
+2 5 add ['add', 'add'] add 10
+wrapper 2
+<b><i>hi</i></b> text text x
+True seen noted 1
+add 0 True
+pong pong 2 ping
+['fig', 'date', 'kiwi', 'pear', 'plum', 'apple', 'banana']
+['banana', 'apple', 'plum', 'pear', 'kiwi', 'date', 'fig']
+[3, 2, 1]
+banana fig
+[1, 2, 5, 9]
+True False True True True False 3
+['1', '9', '10', '100']
+['1.2', '1.9', '1.9.1', '1.10']
+True True False False True True True True True True
+[v0.9, v1.2, v1.10] v1.10 v1.2
+True True True False False
+True False True True False
+True True True False False
+ValueError must define at least one ordering operation: < > <= >=
