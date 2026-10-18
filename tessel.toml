@@ -1,4 +1,12 @@
 # The version of Tessel this project uses: Tessel's commands, editors and
 # the IDE run it with this version, whatever version is installed (and
 # install it the first time). `tessel pin` changes it.
-tessel = "0.1.39"
+tessel = "0.8.0"
+
+# PyTessel as a library for other Tessel programs: `tessel add pytessel`,
+# then `import pytessel` (see embed.tsl). main.tsl is the `pytessel` command.
+[library]
+name = "pytessel"
+version = "0.1.0"
+description = "A Python interpreter: run Python code from a Tessel program"
+license = "MIT"

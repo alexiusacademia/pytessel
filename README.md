@@ -158,16 +158,20 @@ imported instead of it, as in Python.
 
 ## Inside another program
 
-PyTessel can run inside a Tessel program, as a module. Copy every `.tsl`
-file except `main.tsl` into a folder of the program (say `python/`) and
-import it; `embed.tsl` is the way in:
+PyTessel is a published [Tessel library](https://tessel-lang.syncster.dev/guides/libraries/)
+(Tessel 0.8 or later). Add it to a program and import it; `embed.tsl` is
+the way in:
+
+```sh
+tessel add pytessel
+```
 
 ```
-import python
+import pytessel
 
-var py = python.newSession()                 // in a sandbox, by default
-let r = python.run(py, "def double(x):\n    return x * 2\n")
-let c = python.callFunction(py, "double", [.int(i: 21)])   // c.value is .int(i: 42)
+var py = pytessel.newSession()                 // in a sandbox, by default
+let r = pytessel.run(py, "def double(x):\n    return x * 2\n")
+let c = pytessel.callFunction(py, "double", [.int(i: 21)])   // c.value is .int(i: 42)
 ```
 
 - **`run`** runs a text in the session (what it defines stays) and gives
@@ -184,7 +188,7 @@ let c = python.callFunction(py, "double", [.int(i: 21)])   // c.value is .int(i:
   it too. Importing a module of the standard library costs nothing.
 - **`addModule(session, name, source)`** gives the Python a module as text
   for `import name`.
-- **The host:** a struct of the program that conforms to `python.Host`,
+- **The host:** a struct of the program that conforms to `pytessel.Host`,
   set with `setHost`, answers `__host__("name", …)` calls made in Python;
   `hostOf(session) as? YourHost` gives it back with what it changed.
 - A `Session` is a value: copy it, run something in the copy, throw the
@@ -239,3 +243,7 @@ tessel build . -o pytessel
 tests/run.sh             # each tests/*.py, compared with what CPython prints
 tests/run.sh --update    # write the expected output again (needs python3)
 ```
+
+## Licence
+
+MIT: see [LICENSE](LICENSE).
