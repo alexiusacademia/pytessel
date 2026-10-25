@@ -385,7 +385,7 @@ fn genexprNext(_ it: bind Interp, _ id: Int, _ p: PyIter) -> Value {
             var active = p.sources
             var changed = false
             it.iterators[id].running = true
-            let caller = enterBody(it, p.env, "<genexpr>", p.owner, p.receiver)
+            let caller = enterBody(it, p.env, "<genexpr>", p.owner, p.receiver, file: it.fileName)
             it.line = it.prog.lines[element]
             while !active.isEmpty {
                 let level = active.count - 1

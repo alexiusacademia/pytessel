@@ -59,6 +59,10 @@ struct Interp {
     // Where the exception that's raised came through: lines and functions.
     traceLines: [Int] = []
     traceNames: [String] = []
+    // The module of each of those frames ("" for the script itself).
+    traceFiles: [String] = []
+    // The module whose code is running ("" for the script itself).
+    fileName: String = ""
 
     // The built-in exception classes, by name, and the modules imported
     // from files, by name (their `envs`).
@@ -161,6 +165,7 @@ struct Interp {
         signal = .raising
         traceLines = [line]
         traceNames = [funcName]
+        traceFiles = [fileName]
     }
 
     // ---- variables ----
@@ -937,7 +942,7 @@ struct Interp {
             envs[e].captured = true
             e = envs[e].parent
         }
-        closures.append(Closure(fnId: fnId, env: home, name: def.name, defaults: defaults, kwDefaults: kwDefaults, owner: -1))
+        closures.append(Closure(fnId: fnId, env: home, name: def.name, defaults: defaults, kwDefaults: kwDefaults, owner: -1, file: fileName))
         Value.function(id: closures.count - 1)
     }
 
@@ -1042,11 +1047,13 @@ struct Interp {
         }
         let savedEnv = env
         let savedName = funcName
+        let savedFile = fileName
         let savedClass = curClass
         let savedSelf = curSelf
         let callLine = line
         env = e
         funcName = def.name
+        fileName = c.file
         curClass = c.owner
         if c.owner >= 0 && !args.isEmpty {
             curSelf = args[0]
@@ -1071,11 +1078,13 @@ struct Interp {
         depth -= 1
         env = savedEnv
         funcName = savedName
+        fileName = savedFile
         curClass = savedClass
         curSelf = savedSelf
         if signal == .raising {
             traceLines.append(callLine)
             traceNames.append(savedName)
+            traceFiles.append(savedFile)
         }
         line = callLine
         releaseEnv(e)
@@ -1818,6 +1827,7 @@ struct Interp {
                             // (The exception is put aside while its type is worked out.)
                             let lines = traceLines
                             let names = traceNames
+                            let files = traceFiles
                             signal = .none
                             let wanted = eval(type)
                             if signal == .none {
@@ -1831,6 +1841,7 @@ struct Interp {
                             exc = raised
                             traceLines = lines
                             traceNames = names
+                            traceFiles = files
                         }
                         if fits {
                             signal = .none
@@ -1864,6 +1875,7 @@ struct Interp {
         let pendingExc = exc
         let lines = traceLines
         let names = traceNames
+        let files = traceFiles
         signal = .none
         execBlock(finalbody)
         if signal == .none {
@@ -1872,6 +1884,7 @@ struct Interp {
             exc = pendingExc
             traceLines = lines
             traceNames = names
+            traceFiles = files
         }
     }
 
@@ -1902,6 +1915,7 @@ struct Interp {
         let pendingExc = exc
         let lines = traceLines
         let names = traceNames
+        let files = traceFiles
         signal = .none
         let swallow = exitContext(self, manager, if pending == .raising { pendingExc } else { Value.none })
         if signal != .none {
@@ -1915,5 +1929,6 @@ struct Interp {
         exc = pendingExc
         traceLines = lines
         traceNames = names
+        traceFiles = files
     }
 }

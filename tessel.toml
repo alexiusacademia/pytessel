@@ -7,6 +7,6 @@ tessel = "0.8.0"
 # then `import pytessel` (see embed.tsl). main.tsl is the `pytessel` command.
 [library]
 name = "pytessel"
-version = "0.1.0"
+version = "0.2.0"
 description = "A Python interpreter: run Python code from a Tessel program"
 license = "MIT"

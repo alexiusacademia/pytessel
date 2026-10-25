@@ -151,6 +151,8 @@ struct Closure {
     kwDefaults: [Value] = []
     // The class it's a method of (-1 if none), for `super()`.
     owner: Int = -1
+    // The module it was defined in ("" for the script itself).
+    file: String = ""
 }
 
 struct Bound {
@@ -265,6 +267,7 @@ struct GenFrame {
     pendingExc: Value = Value.none
     lines: [Int] = []
     names: [String] = []
+    files: [String] = []
     // The `e` of the `except … as e` block it's in: gone when the block ends.
     unbind: String = ""
 }
@@ -276,6 +279,8 @@ struct Generator {
     fnId: Int
     env: Int
     name: String
+    // The module its function was defined in ("" for the script itself).
+    file: String = ""
     // The class and `self` of a method, as `Interp.curClass` and `curSelf`.
     owner: Int = -1
     receiver: Value = Value.none

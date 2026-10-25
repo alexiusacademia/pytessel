@@ -134,7 +134,19 @@ fn importModule(_ it: bind Interp, _ name: String) -> Value {
     if let source = text {
         parseInto(it.prog, source)
         if it.prog.error != "" {
-            return it.throw("SyntaxError", "{it.prog.error} ({name}.py, line {it.prog.errorLine})")
+            // Raised at the mistake, in the module, and passed on from the
+            // `import`.
+            let importLine = it.line
+            let importFile = it.fileName
+            it.line = it.prog.errorLine
+            it.fileName = name
+            let raised = it.throw("SyntaxError", "{it.prog.error} ({name}.py, line {it.prog.errorLine})")
+            it.line = importLine
+            it.fileName = importFile
+            it.traceLines.append(importLine)
+            it.traceNames.append(it.funcName)
+            it.traceFiles.append(importFile)
+            return raised
         }
         let body = it.prog.body
         let e = it.newEnv(0)
@@ -143,8 +155,11 @@ fn importModule(_ it: bind Interp, _ name: String) -> Value {
         it.modules[name] = e
         let savedEnv = it.env
         let savedName = it.funcName
+        let savedFile = it.fileName
+        let savedLine = it.line
         it.env = e
         it.funcName = "<module>"
+        it.fileName = name
         // Setting up one of PyTessel's own modules isn't the script's
         // work: it doesn't count against the script's budget.
         let savedBudget = it.budget
@@ -157,7 +172,15 @@ fn importModule(_ it: bind Interp, _ name: String) -> Value {
         }
         it.env = savedEnv
         it.funcName = savedName
+        it.fileName = savedFile
         if it.signal != .none {
+            if it.signal == .raising {
+                // (The line of the `import`, in the module that has it.)
+                it.traceLines.append(savedLine)
+                it.traceNames.append(savedName)
+                it.traceFiles.append(savedFile)
+            }
+            it.line = savedLine
             it.modules.removeValue(forKey: name)
             return Value.none
         }

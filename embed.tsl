@@ -44,6 +44,7 @@ fn reset(_ it: bind Interp) {
     it.env = 1
     it.depth = 0
     it.funcName = "<module>"
+    it.fileName = ""
     it.curClass = -1
     it.handling = []
 }
@@ -188,6 +189,9 @@ public struct RunResult {
     output: String = ""
     error: String = ""
     line: Int = 0
+    // The module `line` is in: "" for the script that was run, or the
+    // name of a module it imported (one given with addModule).
+    module: String = ""
     trace: String = ""
     // What a called function returned.
     value: HostValue = .none
@@ -232,6 +236,7 @@ fn takeFailure(_ it: bind Interp, _ result: bind RunResult) {
     let raised = it.exc
     let lines = it.traceLines
     let names = it.traceNames
+    let files = it.traceFiles
     it.signal = .none
     it.exc = .none
     var kind = "Exception"
@@ -252,16 +257,19 @@ fn takeFailure(_ it: bind Interp, _ result: bind RunResult) {
     var trace = ["Traceback (most recent call last):"]
     var i = lines.count - 1
     while i >= 0 {
-        trace.append("  File \"{it.scriptName}\", line {lines[i]}, in {names[i]}")
+        let file = if i < files.count && !files[i].isEmpty { "{files[i]}.py" } else { it.scriptName }
+        trace.append("  File \"{file}\", line {lines[i]}, in {names[i]}")
         i -= 1
     }
     result.ok = false
     result.error = if text == "" { kind } else { "{kind}: {text}" }
     result.line = lines.first ?? it.line
+    result.module = files.first ?? ""
     trace.append(result.error)
     result.trace = trace.joined(separator: "\n")
     it.traceLines = []
     it.traceNames = []
+    it.traceFiles = []
     reset(it)
 }
 

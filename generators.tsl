@@ -25,12 +25,14 @@ struct Caller {
     cls: Int
     receiver: Value
     line: Int
+    file: String = ""
 }
 
-fn enterBody(_ it: bind Interp, _ env: Int, _ name: String, _ owner: Int, _ receiver: Value) -> Caller {
-    let caller = Caller(env: it.env, name: it.funcName, cls: it.curClass, receiver: it.curSelf, line: it.line)
+fn enterBody(_ it: bind Interp, _ env: Int, _ name: String, _ owner: Int, _ receiver: Value, file: String) -> Caller {
+    let caller = Caller(env: it.env, name: it.funcName, cls: it.curClass, receiver: it.curSelf, line: it.line, file: it.fileName)
     it.env = env
     it.funcName = name
+    it.fileName = file
     it.curClass = owner
     it.curSelf = receiver
     it.depth += 1
@@ -41,11 +43,13 @@ fn leaveBody(_ it: bind Interp, _ caller: Caller) {
     it.depth -= 1
     it.env = caller.env
     it.funcName = caller.name
+    it.fileName = caller.file
     it.curClass = caller.cls
     it.curSelf = caller.receiver
     if it.signal == .raising {
         it.traceLines.append(caller.line)
         it.traceNames.append(caller.name)
+        it.traceFiles.append(caller.file)
     }
     it.line = caller.line
 }
@@ -55,7 +59,7 @@ fn leaveBody(_ it: bind Interp, _ caller: Caller) {
 fn makeGenerator(_ it: bind Interp, _ closure: Int, _ env: Int, _ receiver: Value) -> Value {
     let c = it.closures[closure]
     let def = it.prog.defs[c.fnId]
-    it.generators.append(Generator(fnId: c.fnId, env: env, name: def.name, owner: c.owner, receiver: receiver,
+    it.generators.append(Generator(fnId: c.fnId, env: env, name: def.name, file: c.file, owner: c.owner, receiver: receiver,
                                    frames: [GenFrame(body: def.body)]))
     it.freshGenerator = it.generators.count - 1
     it.freshDepth = it.depth
@@ -84,7 +88,7 @@ fn genResume(_ it: bind Interp, _ gid: Int, _ sent: Value, _ throwing: Bool) -> 
         return Value.absent
     }
     let env = it.generators[gid].env
-    let caller = enterBody(it, env, it.generators[gid].name, it.generators[gid].owner, it.generators[gid].receiver)
+    let caller = enterBody(it, env, it.generators[gid].name, it.generators[gid].owner, it.generators[gid].receiver, file: it.generators[gid].file)
     // The exceptions its `except` blocks were handling are back.
     let base = it.handling.count
     if !it.generators[gid].handling.isEmpty {
@@ -529,6 +533,7 @@ fn genBlockEnd(_ it: bind Interp, _ gid: Int, _ top: Int) {
                     it.exc = frame.pendingExc
                     it.traceLines = frame.lines
                     it.traceNames = frame.names
+                    it.traceFiles = frame.files
                 }
                 return
             }
@@ -588,6 +593,7 @@ fn genFinally(_ it: bind Interp, _ gid: Int, _ top: Int) {
     it.generators[gid].frames[top].pendingExc = it.exc
     it.generators[gid].frames[top].lines = it.traceLines
     it.generators[gid].frames[top].names = it.traceNames
+    it.generators[gid].frames[top].files = it.traceFiles
     it.signal = .none
     it.generators[gid].frames[top].phase = 3
     it.generators[gid].frames[top].body = finalbody
@@ -611,6 +617,7 @@ fn genHandle(_ it: bind Interp, _ gid: Int, _ top: Int) -> Bool {
                     // (The exception is put aside while its type is worked out.)
                     let lines = it.traceLines
                     let names = it.traceNames
+                    let files = it.traceFiles
                     it.signal = .none
                     let wanted = it.eval(type)
                     if it.signal == .none {
@@ -624,6 +631,7 @@ fn genHandle(_ it: bind Interp, _ gid: Int, _ top: Int) -> Bool {
                     it.exc = raised
                     it.traceLines = lines
                     it.traceNames = names
+                    it.traceFiles = files
                 }
                 if fits {
                     it.signal = .none
@@ -678,6 +686,7 @@ fn genUnwind(_ it: bind Interp, _ gid: Int, _ top: Int) {
             let pendingExc = it.exc
             let lines = it.traceLines
             let names = it.traceNames
+            let files = it.traceFiles
             it.signal = .none
             let swallow = exitContext(it, manager, if pending == .raising { pendingExc } else { Value.none })
             if it.signal != .none {
@@ -691,6 +700,7 @@ fn genUnwind(_ it: bind Interp, _ gid: Int, _ top: Int) {
             it.exc = pendingExc
             it.traceLines = lines
             it.traceNames = names
+            it.traceFiles = files
         }
     }
 }
@@ -769,6 +779,7 @@ fn genAbandon(_ it: bind Interp, _ gid: Int) {
     let pendingExc = it.exc
     let lines = it.traceLines
     let names = it.traceNames
+    let files = it.traceFiles
     it.signal = .none
     genClose(it, gid)
     // (What goes wrong in it then is nobody's to catch.)
@@ -777,6 +788,7 @@ fn genAbandon(_ it: bind Interp, _ gid: Int) {
     it.exc = pendingExc
     it.traceLines = lines
     it.traceNames = names
+    it.traceFiles = files
 }
 
 // ---- send, throw, close ----
